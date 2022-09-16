@@ -45,12 +45,15 @@ def load_model_from_config(config, ckpt, verbose=False):
     return model
 
 
-def load_img(path):
+def load_img(path, size=None):
     image = Image.open(path).convert("RGB")
     w, h = image.size
     print(f"loaded input image of size ({w}, {h}) from {path}")
     w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-    image = image.resize((w, h), resample=PIL.Image.LANCZOS)
+    if size is None:
+        image = image.resize((w, h), resample=PIL.Image.LANCZOS)
+    else:
+        image = image.resize(size, resample=PIL.Image.LANCZOS)
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
