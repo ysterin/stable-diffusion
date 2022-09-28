@@ -48,7 +48,7 @@ H, W, C, f = 512, 512, 4, 8
 
 prompt = "Photo of a fashion model with long hair, studio lightning"
 reversion_prompt = "Photo of a fashion model with short hair, studio lightning"
-reversion_prompt = prompt
+# reversion_prompt = prompt
 save_dir = "../outputs/edit_test/7"
 scale = 5
 inversion_scale = 5
@@ -66,6 +66,7 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 model = model.to(device)
 uc = model.get_learned_conditioning(batch_size * [""])
 cond = model.get_learned_conditioning(batch_size * [prompt])
+reversion_cond = model.get_learned_conditioning(batch_size * [reversion_prompt])
 # dnw = K.external.CompVisDenoiser(model)
 dnw = CFGCompVisDenoiser(model)
 sigmas = dnw.get_sigmas(ddim_steps)
@@ -99,6 +100,9 @@ def make_cond_model_fn(model, cond_fn):
             x = x.detach().requires_grad_()
             denoised = model(x, sigma, **kwargs)
             cond_grad = cond_fn(x, sigma, denoised=denoised, **kwargs).detach()
+            print(f"cond_grad * K.utils.append_dims(sigma**2, x.ndim): "
+                  f"{(cond_grad * K.utils.append_dims(sigma**2, x.ndim)).abs().mean()}")
+            print(f"sigma: {sigma}")
             cond_denoised = denoised.detach() + cond_grad * K.utils.append_dims(sigma**2, x.ndim)
         return cond_denoised
     return model_fn
@@ -110,27 +114,41 @@ def make_static_thresh_model_fn(model, value=1.):
     return model_fn
 
 
-def l2_loss_guidance_func(orig_img, model, grad_scale=1e-3):
-    if isinstance(orig_img, np.ndarray):
-        orig_img = torch.from_numpy(orig_img)
-    orig_img = orig_img.to(device)
-    if orig_img.ndim == 3:
-        orig_img = orig_img.unsqueeze(0)
+def l2_loss_guidance_func(original, model, grad_scale=1e-3, target="image"):
+    assert target in ["image", "latent"]
+    if isinstance(original, np.ndarray):
+        orig_img = torch.from_numpy(original)
+    original = original.to(device)
+    if original.ndim == 3:
+        original = original.unsqueeze(0)
     # if orig_img.dtype == torch.uint8:
     #     orig_img = orig_img.float() / 255.0
     # if orig_img.shape[-1] == 3:
     #     orig_img = orig_img.permute(0, 3, 1, 2)
+    if target == 'latent':
+        orig_img = model.decode_first_stage(original)
+        orig_img = (orig_img + 1) / 2 * 255
+        orig_img = rearrange(orig_img, "b c h w -> b h w c")
 
     def grad_func(x, sigma, denoised, **kwargs):
-        z_0 = denoised
-        x_0 = model.differentiable_decode_first_stage(z_0)
-        x_0 = (x_0 + 1) / 2 * 255
-        x_0 = rearrange(x_0, "b c h w -> b h w c")
-        loss = ((x_0 - orig_img) ** 2).mean()
-        # loss = ((x_0 - orig_img).abs()).mean()
-        grad = - torch.autograd.grad(loss, x)[0]
+        x_0 = denoised
+        if target == 'image':
+            x_0 = model.differentiable_decode_first_stage(x_0)
+            x_0 = (x_0 + 1) / 2 * 255
+            x_0 = rearrange(x_0, "b c h w -> b h w c")
+        with torch.enable_grad():
+            loss = ((x_0 - original) ** 2).mean()
+            grad = - torch.autograd.grad(loss, x)[0]  # / K.utils.append_dims(sigma, x.ndim)
+        if target == 'latent':
+            grad /= K.utils.append_dims(sigma ** 2, x.ndim)
         print(f"loss: {loss}")
         print("mean grad:", grad.abs().mean())
+
+        if target == 'latent':
+            x_0 = model.decode_first_stage(x_0)
+            x_0 = (x_0 + 1) / 2 * 255
+            x_0 = rearrange(x_0, "b c h w -> b h w c")
+
         fig, axes = plt.subplots(1, 2)
         axes[0].imshow(orig_img[1].detach().cpu().numpy().astype(np.uint8))
         axes[1].imshow(x_0[1].detach().cpu().numpy().astype(np.uint8))
@@ -139,8 +157,8 @@ def l2_loss_guidance_func(orig_img, model, grad_scale=1e-3):
 
     return grad_func
 
-with nullcontext():
-    with nullcontext(): #  autocast("cuda"):
+with torch.no_grad():
+    with autocast('cuda'): #  autocast("cuda"):
         c_out, c_in = dnw.get_scalings(sigmas[0])
         noise = noise / c_in
         sigmas[-1] = 1e-5
@@ -150,10 +168,10 @@ with nullcontext():
         # c_out, c_in = dnw.get_scalings(sigmas[-1])
         # print(c_in)
 
-        x_samples = model.decode_first_stage(sample)
-        x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-        x_samples = x_samples * 255.0
-        x_samples = rearrange(x_samples, "b c h w -> b h w c")
+        # x_samples = model.decode_first_stage(sample)
+        # x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+        # x_samples = x_samples * 255.0
+        # x_samples = rearrange(x_samples, "b c h w -> b h w c")
 
         reverse_sigmas = dnw.get_sigmas(inversion_steps).flip(0)
         reverse_sigmas[0] = sigmas[-1]
@@ -162,11 +180,13 @@ with nullcontext():
                                 extra_args={'cond': cond, 'uncond': uc, 'cfg_scale': inversion_scale},
                                 callback=get_progress_bar(inversion_steps, "invert sampling"))
 
-        guided_model_fn = make_cond_model_fn(dnw, l2_loss_guidance_func(x_samples, model, grad_scale=1e-1))
-        guided_model_fn = make_static_thresh_model_fn(guided_model_fn, value=1.0)
+        # guided_model_fn = make_cond_model_fn(dnw, l2_loss_guidance_func(x_samples, model, grad_scale=1e-1))
+        guided_model_fn = make_cond_model_fn(dnw, l2_loss_guidance_func(sample, model, grad_scale=1e4, target='latent'))
+
+        # guided_model_fn = make_static_thresh_model_fn(guided_model_fn, value=1.0)
 
         recon_sample = sample_fn(guided_model_fn, recon_noise, sigmas,
-                                 extra_args={'cond': cond, 'uncond': uc, 'cfg_scale': scale},
+                                 extra_args={'cond': reversion_cond, 'uncond': uc, 'cfg_scale': scale},
                                  callback=get_progress_bar(ddim_steps, "sampling"))
 
         c_out, c_in = dnw.get_scalings(sigmas[0])
@@ -192,16 +212,3 @@ with nullcontext():
         axes[0].set_title("Original")
         axes[1].set_title("Reconstructed")
         plt.show()
-
-    # latent = sample.clone().detach()
-    # x_samples = model.decode_first_stage(sample)
-    # x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-    #
-    # # x_samples_ddim = rearrange(x_samples_ddim, "b c h w -> b h w c")
-    # for i, x_sample in enumerate(x_samples):
-    #     x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-    #     img = Image.fromarray(x_sample.astype(np.uint8))
-    #
-    #     img.save(f"{save_dir}/{prompt.replace(' ', '_')}_{i}.png")
-    #     plt.imshow(x_sample.astype(np.uint8))
-    #     plt.show()
