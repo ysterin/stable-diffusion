@@ -27,6 +27,69 @@ from torch import autocast
 from einops import rearrange, repeat
 from tqdm import trange
 import os
+import wandb
+
+
+def find_large_bbox(bbox, image_shape, required_size=512):
+    """Find a large bbox that contains the given bbox and has the given size.
+    The large bbox should be centered on the same center as the original, unless it is too close to the edge
+    of the image, in which case it should be shifted to the edge.
+        Args:
+        bbox: [x, y, w, h]
+        image_shape: [h, w]
+        required_size: int
+
+    """
+    x, y, w, h = bbox
+    center_x = x + w / 2
+    center_y = y + h / 2
+    half_size = required_size / 2
+    new_x = max(0, center_x - half_size)
+    new_y = max(0, center_y - half_size)
+    new_w = min(image_shape[1] - new_x, required_size)
+    new_h = min(image_shape[0] - new_y, required_size)
+    return new_x, new_y, new_w, new_h
+
+
+def warp_matrix_to_bbox(warp_mat, image_shape):
+    """finds a warp matrix that warp the image to the bbox
+    Args:
+        warp_mat: [3, 2]
+    returns:
+        bbox: [x, y, w, h]
+    """
+    warp_mat = warp_mat.detach().cpu().numpy()
+    x = warp_mat[0, 2]
+    y = warp_mat[1, 2]
+    w = image_shape[1] / warp_mat[0, 0]
+    h = image_shape[0] / warp_mat[1, 1]
+    return x, y, w, h
+
+def get_warp_matrix(bbox, image_shape):
+    """finds a warp matrix that warp the image to the bbox
+    Args:
+        bbox: [x, y, w, h]
+        image_shape: [h, w]
+    returns:
+        warp_mat: [3, 2]
+    """
+    x, y, w, h = bbox
+    center_x = x + w / 2
+    center_y = y + h / 2
+    half_size = w / 2
+    new_x = max(0, center_x - half_size)
+    new_y = max(0, center_y - half_size)
+    new_w = min(image_shape[1] - new_x, w)
+    new_h = min(image_shape[0] - new_y, h)
+    warp_mat = np.array([[new_w / w, 0, new_x - x],
+                         [0, new_h / h, new_y - y]])
+    return warp_mat
+
+
+def increase_warp_matrix(warp_matrix, scale=2.0):
+    warp_matrix[0, 0] *= scale
+    warp_matrix[1, 1] *= scale
+    return warp_matrix
 
 def make_cond_model_fn(model, cond_fn):
     def model_fn(x, sigma, **kwargs):
@@ -47,18 +110,22 @@ def make_static_thresh_model_fn(model, value=1.):
     return model_fn
 
 
-def identity_loss_guidance_func(model, face_net, face_feats, warp_matrix, grad_scale=1e-3, max_sigma=1.0):
+def identity_loss_guidance_func(model, face_net, face_feats, warp_matrix=None, grad_scale=1e-3,
+                                max_sigma=1.0, min_sigma=0.3):
     device = model.device
     face_feats = torch.Tensor(face_feats).to(device)
     def grad_fn(x, sigma, denoised, **kwargs):
-        if sigma > max_sigma:
+        if sigma > max_sigma or sigma < min_sigma:
             return torch.zeros_like(x)
         device = x.device
         batch_size = x.shape[0]
         x_0 = model.differentiable_decode_first_stage(denoised)
-        warp_mat = torch.Tensor(warp_matrix)[None].to(device).repeat((batch_size, 1, 1))
 
-        face_crop = kornia.geometry.warp_affine(x_0, warp_mat, dsize=(112, 112))
+        if warp_matrix is not None:
+            warp_mat = torch.Tensor(warp_matrix)[None].to(device).repeat((batch_size, 1, 1))
+            face_crop = kornia.geometry.warp_affine(x_0, warp_mat, dsize=(112, 112))
+        else:
+            face_crop = kornia.geometry.transform.resize(x_0, (112, 112))
 
         predicted_face_feats = face_net(face_crop)
         cos_loss = cos_loss_f(face_feats, predicted_face_feats)
@@ -118,15 +185,18 @@ def l2_loss_guidance_func(original, model, grad_scale=1e-3, target="image", devi
 
 def main():
 
-    # images_dir = '../assets/sample_images/fashion_images/full body/images'
-    # source_image = os.path.join(images_dir, 'Fashionnova.webp')
-    # target_image = os.path.join(images_dir, 'H_M.jpg')
-    images_dir = '../assets/sample_images/faces'
-    source_image = os.path.join(images_dir, 'Elior_portrait_1_v01.jpg')
-    target_image = os.path.join(images_dir, 'Shuki_portrait_2.jpg')
+    images_dir = '../assets/sample_images/fashion_images/full body/images'
+    target_image_path = os.path.join(images_dir, 'H_M.jpg')
+    # target_image_path = os.path.join(images_dir, 'Fashionnova.webp')
+    source_image_path = os.path.join(images_dir, 'Bobo choses.jpg')
+
+
+    # images_dir = '../assets/sample_images/faces'
+    # source_image_path = os.path.join(images_dir, 'Elior_portrait_1_v01.jpg')
+    # target_image_path = os.path.join(images_dir, 'Shuki_portrait_2.jpg')
     # source_image = target_image
-    source_image = cv2.imread(source_image)
-    target_image = cv2.imread(target_image)
+    source_image = cv2.imread(source_image_path)
+    target_image = cv2.imread(target_image_path)
     source_image = cv2.cvtColor(source_image, cv2.COLOR_BGR2RGB)
     target_image = cv2.cvtColor(target_image, cv2.COLOR_BGR2RGB)
     seed = 407
@@ -137,6 +207,13 @@ def main():
     H, W, C, f = 512, 512, 4, 8
     plt.imshow(target_image)
     plt.show()
+
+    warp_matrix, _ = get_init_feat(target_image)
+    # warp_matrix[:, :] *= 112 / H
+    # target_image = cv2.warpAffine(target_image, warp_matrix, (W, H))
+    # target_image = cv2.warpAffine(target_image, warp_matrix, (112, 112))
+
+    # target_image = cv2.resize(target_image, (W, H))
 
     scale_factor = max(H / target_image.shape[0], W / target_image.shape[1])
     target_image = cv2.resize(target_image, (0, 0), fx=scale_factor, fy=scale_factor)
@@ -152,6 +229,8 @@ def main():
     # m1, img_feats1 = get_init_feat(img1)
     _, source_face_feats = get_init_feat(source_image)
     warp_matrix, _ = get_init_feat(target_image)
+    # warp_matrix = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    # warp_matrix = None
 
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
     model = load_model_from_config(config, "../models/ldm/stable-diffusion-v1/model.ckpt")
@@ -168,10 +247,10 @@ def main():
 
     sample_fn = K.sampling.sample_lms
     identity_conf_fn = identity_loss_guidance_func(model, facenet, source_face_feats, warp_matrix,
-                                                   grad_scale=100, max_sigma=5.0)
+                                                   grad_scale=50, max_sigma=3.0, min_sigma=0.0)
     forward_model_fn = make_cond_model_fn(dnw, cond_fn=identity_conf_fn)
     # forward_model_fn = make_static_thresh_model_fn(forward_model_fn, 1.0)
-
+    # forward_model_fn = dnw
     with autocast('cuda'):
         init_image = torch.from_numpy(np.array(target_image)).to(device).float() / 255
         init_image = init_image * 2 - 1
@@ -187,7 +266,7 @@ def main():
                                 callback=get_progress_bar(ddim_steps, "invert sampling"))
 
         recon_sample = sample_fn(forward_model_fn, recon_noise, sigmas, extra_args={"cfg_scale": 0},
-                                 callback=get_progress_bar(50, "sampling"))
+                                 callback=get_progress_bar(ddim_steps, "sampling"))
 
         recon_image = model.decode_first_stage(recon_sample)
         recon_image = rearrange(recon_image, 'b c h w -> b h w c')
@@ -200,6 +279,9 @@ def main():
     axes[0].imshow(target_image)
     axes[1].imshow(recon_image[0])
     plt.show()
+    save_path = f"outputs/face_swap_test/{source_image_path.split('/')[-1].split('.')[0]}_to_{target_image_path.split('/')[-1].split('.')[0]}.png"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    cv2.imwrite(save_path, cv2.cvtColor(recon_image[0], cv2.COLOR_RGB2BGR))
 
 
 def load_facenet(device='cuda'):
