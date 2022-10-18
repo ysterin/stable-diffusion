@@ -9,7 +9,6 @@ from tqdm import tqdm, trange
 from einops import rearrange
 import time
 from pytorch_lightning import seed_everything
-from torch import autocast
 from contextlib import contextmanager, nullcontext
 import kornia
 from playground.backbones import get_model
@@ -36,18 +35,6 @@ def blended_diffusion_model_func(model):
             return denoised
         mask = kwargs["mask"]
         source = kwargs["source"]
-        # source = source * (1 - mask)
-        # c_out, c_in = model.get_scalings(sigma)
-        # noised_source = source + torch.randn_like(source) * K.utils.append_dims(sigma, source.ndim)
-        # print("\n")
-        # print(f"x: {x.std().item()}")
-        # print(f"noised_source: {noised_source.std().item()}")
-        # print("noised_source_1: ", (noised_source / c_in).std().item())
-        # print("noised_source_2: ", (noised_source * c_in).std().item())
-        # # print(f"source: {source.std().item()}")
-        # print(f"denoised: {denoised.std().item()}")
-        # noised_source = noised_source * c_in
-        # return denoised
         return denoised * mask + source * (1 - mask)
 
     return model_fn
@@ -96,6 +83,12 @@ def make_cond_model_fn(model, cond_fn):
         return cond_denoised
 
     return model_fn
+
+def dilate_mask(mask, kernel_size=2):
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    mask = (mask > 0).astype(np.uint8)
+    return mask
 
 @torch.no_grad()
 def sample_euler_inpainting(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0.,
@@ -147,83 +140,118 @@ def sample_euler_inpainting(model, x, sigmas, extra_args=None, callback=None, di
 
     return x
 
+def crop_to_shape(image, height, width):
+    img_height, img_width = image.shape[:2]
+    if img_height / height > img_width / width:
+        img_height = int(height * img_width / width)
+        image = image[:img_height, ...]
+        scale_factor = height / img_height
+    else:
+        new_width = int(width * img_height / height)
+        image = image[:, img_width // 2 - new_width // 2:img_width // 2 + new_width // 2]
+        img_width = new_width
+        scale_factor = width / img_width
+    aspect_ratio = img_width / img_height
+    assert np.allclose(aspect_ratio, width / height, rtol=0.02), f"Aspect ratio mismatch: {aspect_ratio} != {width / height}, " \
+                                           f"img_width: {img_width}, img_height: {img_height}"
+    image = cv2.resize(image, dsize=(width, height), interpolation= cv2.INTER_LINEAR)
+    print(image.shape)
+    return image
 
 def main():
-    # images_dir = '../data/inpainting_examples'
-    # image_name = "bertrand-gabioud-CpuFzIsHYJ0"
-    # image_name = "bench2"
-    # image_name = "overture-creations-5sI6fQgYIuo"
-    # source_image_path = os.path.join(images_dir, f"{image_name}.png")
-    # face_mask_path = os.path.join(images_dir, f"{image_name}_mask.png")
-    cropped_dir = '../assets/sample_images/fashion_images/full body/cropped'
-    image_name = "abjx300603_billabong,w_mul_frt1"
-    image_name = "H_M"
-    mask_name = "head"
-    source_image_path = os.path.join(cropped_dir, image_name + '.png')
-    face_mask_path = os.path.join(cropped_dir, f"{image_name}_{mask_name}.png")
-    source_image = cv2.imread(source_image_path)
-    source_image = cv2.cvtColor(source_image, cv2.COLOR_BGR2RGB)
-    mask = cv2.imread(face_mask_path, cv2.IMREAD_GRAYSCALE)
     seed = 4642326
     batch_size = 1
     ddim_steps = 50
-    denoising_strength = 0.75
+    denoising_strength = 0.3
+    scale = 20
+
     seed_everything(seed)
-    H, W, C, f = 512, 512, 4, 8
-    plt.imshow(source_image)
-    plt.show()
+    H, W, C, f = 1024, 640, 4, 8
 
     # prompt = "An apartment complex in the city"
     prompt = "a baby sitting on a bench"
     # prompt = "a green bench in a park"
     prompt = "Emma Watson, studio lightning, realistic, fashion photoshoot, asos, perfect face, symmetric face"
+    prompt = "shukistern guy"
     negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, unrealistic, imaginative"
-    scale_factor = max(H / source_image.shape[0], W / source_image.shape[1])
-    mask = cv2.resize(mask, (0, 0), fx=scale_factor, fy=scale_factor)
-    mask = mask[:H]
-    H, W = source_image.shape[:2]
-
-    # prompt = "A forest full of trees"
-    # mask = 255 - mask
-
-    masked_image = (source_image * (1 - mask[:, :, None] / 255) + mask[:, :, None]).astype(np.uint8)
-
-
-    # img_width, img_height = source_image.shape[1], source_image.shape[0]
-    # source_image = source_image[:H, (img_width - W) // 2:(img_width - W) // 2 + W]
-    # mask = mask[:H, (img_width - W) // 2:(img_width - W) // 2 + W]
-
-    fig, axes = plt.subplots(1, 3)
-    axes[0].imshow(source_image)
-    axes[1].imshow(mask)
-    axes[2].imshow(masked_image)
-    plt.show()
-
+    # scale_factor = max(H / source_image.shape[0], W / source_image.shape[1])
+    # mask = cv2.resize(mask, (0, 0), fx=scale_factor, fy=scale_factor)
+    # mask = mask[:H]
+    # H, W = source_image.shape[:2]
 
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
-    model = load_model_from_config(config, "../models/ldm/stable-diffusion-v1/model.ckpt")
+    model = load_model_from_config(config, "../models/ldm/stable-diffusion-v1/model_shuki1.ckpt")
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model = model.to(device).half()
+    model = model.to(device)
 
-    dnw = CFGCompVisDenoiser(model)
-    sigmas = dnw.get_sigmas(ddim_steps)
+    cropped_dir = '../assets/sample_images/fashion_images/full body/uncropped'
+    outputs_dir = f"outputs/inpainting/fashion_images/full body/{prompt.replace(' ', '_')}"
+    os.makedirs(outputs_dir, exist_ok=True)
+    image_name = "abjx300603_billabong,w_mul_frt1"
+    image_name = "H_M"
+    image_name = "Terminal_tank_1"
+    mask_name = "body"
+    mask_dilation = 8
+    image_list = ["Terminal_tank_1", "Terminal_tank_2", "Terminal_tank_3"]
+    for image_name in image_list:
+        source_image_path = os.path.join(cropped_dir, image_name + '.png')
+        face_mask_path = os.path.join(cropped_dir, f"{image_name}_{mask_name}.png")
+        source_image = cv2.imread(source_image_path)
+        source_image = cv2.cvtColor(source_image, cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(face_mask_path, cv2.IMREAD_GRAYSCALE)
+
+        plt.imshow(source_image)
+        plt.show()
+
+        source_image = crop_to_shape(source_image, H, W)
+        mask = crop_to_shape(mask, H, W)
+
+        mask = dilate_mask(mask, kernel_size=mask_dilation)
+
+        mask, recon_image = inpaint_image(source_image, mask, model, prompt, negative_prompt,
+                                          ddim_steps=ddim_steps, denoising_strength=denoising_strength,
+                                          cfg_scale=scale, device=device)
+
+        fig, axes = plt.subplots(1, 4, figsize=(40, 10))
+        axes[0].imshow(source_image)
+        axes[1].imshow(mask.detach().cpu().numpy())
+        axes[2].imshow(recon_image[0])
+
+        # axes[3].imshow(recon_image_1[0])
+        axes[0].set_title(f"Source")
+        axes[1].set_title(f"Mask")
+        axes[2].set_title(f"Editing scale: {scale}")
+        axes[3].set_title(f"Editing scale: {scale}")
+
+        # plt.title(f"prompt: {prompt}", loc="left")
+
+        plt.show()
+        rec_img = cv2.cvtColor(recon_image[0], cv2.COLOR_RGB2BGR)
+        # rec_img_1 = cv2.cvtColor(recon_image_1[0], cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}.png"), rec_img)
+        # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_1.png"), rec_img_1)
+
+
+def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps, denoising_strength=0.5, cfg_scale=10,
+                  device='cuda', batch_size=1, alpha=0):
+    masked_image = (source_image * (1 - mask[:, :, None] / 255) + mask[:, :, None]).astype(np.uint8)
+    n_steps = int(denoising_strength * ddim_steps)
+    # fig, axes = plt.subplots(1, 3)
+    # axes[0].imshow(source_image)
+    # axes[1].imshow(mask)
+    # axes[2].imshow(masked_image)
+    # plt.show()
+    dnw = CFGCompVisDenoiser(model.to(device), batch_cond_uncond=False, device=device)
+    sigmas = dnw.get_sigmas(ddim_steps).to(device)
     sigmas[-1] = 1e-5
-    c_out, c_in = dnw.get_scalings(sigmas[0])
-
-    # sample_fn = K.sampling.sample_lms
-    # sample_fn = lambda *args, e**kwargs: K.sampling.sample_euler(*args, **kwargs, s_noise=0.0)
-    alpha = 1e-2
     sample_fn = lambda *args, **kwargs: sample_euler_inpainting(*args, **kwargs, s_noise=1.0, mcg_alpha=alpha)
-    sample_fn_1 = lambda *args, **kwargs: K.sampling.sample_euler(*args, **kwargs, s_noise=1.0)
     model_fn = dnw
-    mcg_cond_fn = make_mcg_guidance_fn(alpha=alpha)
-    model_fn_1 = make_cond_model_fn(model_fn, mcg_cond_fn)
-    model_fn_1 = blended_diffusion_model_func(model_fn_1)
-    n_steps = int(ddim_steps * denoising_strength)
-
+    # model.to('cpu')
     with torch.no_grad():
-        with autocast('cuda'):
+        with autocast('cuda', dtype=torch.float16):
+        # with nullcontext():
+        #     model.cond_stage_model.to(device)
             mask = torch.from_numpy(mask).to(device).float() / 255
             mask = mask.ceil()
             uc = model.get_learned_conditioning(batch_size * [""])
@@ -231,6 +259,7 @@ def main():
             if negative_prompt is not None and negative_prompt != "":
                 uc = model.get_learned_conditioning(batch_size * [negative_prompt])
 
+            # model.cond_stage_model.to('cpu')
 
             init_image = torch.from_numpy(np.array(source_image)).to(device).float() / 255
             init_image = init_image * 2 - 1
@@ -238,68 +267,49 @@ def main():
             init_image = init_image.unsqueeze(0)
             init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
 
+            # model.first_stage_model.to(device)
             init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))
+            # model.first_stage_model.to('cpu')
             latent_mask = kornia.geometry.transform.resize(mask, (init_latent.shape[-2], init_latent.shape[-1]))
             latent_mask = latent_mask.unsqueeze(0).unsqueeze(0).ceil()
             # latent_mask = torch.concat([latent_mask, torch.ones_like(latent_mask)], dim=0)
             sigma = sigmas[-n_steps - 1]
-            sigma = K.utils.append_dims(sigma, init_latent.ndim)
-            c_out, c_in = dnw.get_scalings(sigma)
-            print(f"sigma: {sigma}")
+            sigma = K.utils.append_dims(sigma, init_latent.ndim).to(device)
+            # c_out, c_in = dnw.get_scalings(sigma)
             noised_latent = (init_latent + torch.randn_like(init_latent) * sigma)
-            random_noise = torch.randn_like(init_latent) / c_in
-            # noised_latent = random_noise
+            # random_noise = torch.randn_like(init_latent) / c_in
 
-            for scale in [1.0, 5.0, 7.5]:
-                editing_cfg_scale = scale
-                # recon_noise = sample_fn(dnw, init_latent, reverse_sigmas[:n_steps],
-                #                                   extra_args={"cfg_scale": inversion_cfg_scale, "cond": inversion_cond,
-                #                                               "uncond": uc},
-                #                                   callback=get_progress_bar(n_steps, "invert sampling"))
-                # init_latent = None
-                # latent_mask = torch.ones_like(latent_mask)
-                recon_sample = sample_fn(model_fn, noised_latent, sigmas[-n_steps-1:],
-                                         extra_args={"cfg_scale": editing_cfg_scale, "cond": cond, "uncond": uc,
-                                                     "mask": latent_mask, "source": init_latent},
-                                         callback=get_progress_bar(ddim_steps, "sampling"))
+            editing_cfg_scale = cfg_scale
+            # model.model.to(device)
+            recon_sample = sample_fn(model_fn, noised_latent, sigmas[-n_steps - 1:],
+                                     extra_args={"cfg_scale": editing_cfg_scale, "cond": cond, "uncond": uc,
+                                                 "mask": latent_mask, "source": init_latent},
+                                     callback=get_progress_bar(ddim_steps, "sampling"))
+            # model.model.to('cpu')
+            # model.first_stage_model.to(device)
+            recon_image = model.decode_first_stage(recon_sample)
+            # model.first_stage_model.to('cpu')
+            recon_image = rearrange(recon_image, 'b c h w -> b h w c')
 
-                recon_sample_1 = sample_fn_1(model_fn_1, noised_latent, sigmas[-n_steps-1:],
-                                             extra_args={"cfg_scale": editing_cfg_scale, "cond": cond, "uncond": uc,
-                                                            "mask": latent_mask, "source": init_latent},
-                                                callback=get_progress_bar(ddim_steps, "sampling"))
+            recon_image = ((recon_image + 1) / 2).clamp(0, 1)
+            recon_image = recon_image.cpu().numpy()
+            recon_image = np.clip(recon_image * 255, 0, 255).astype(np.uint8)
+
+    return mask, recon_image
 
 
-                recon_image = model.decode_first_stage(recon_sample)
-                recon_image = rearrange(recon_image, 'b c h w -> b h w c')
-
-                recon_image = ((recon_image + 1) / 2).clamp(0, 1)
-                recon_image = recon_image.cpu().numpy()
-                recon_image = np.clip(recon_image * 255, 0, 255).astype(np.uint8)
-
-                recon_image_1 = model.decode_first_stage(recon_sample_1)
-                recon_image_1 = rearrange(recon_image_1, 'b c h w -> b h w c')
-
-                recon_image_1 = ((recon_image_1 + 1) / 2).clamp(0, 1)
-                recon_image_1 = recon_image_1.cpu().numpy()
-                recon_image_1 = np.clip(recon_image_1 * 255, 0, 255).astype(np.uint8)
-
-                fig, axes = plt.subplots(1, 4, figsize=(40, 10))
-                axes[0].imshow(source_image)
-                axes[1].imshow(mask.detach().cpu().numpy())
-                axes[2].imshow(recon_image[0])
-
-                axes[3].imshow(recon_image_1[0])
-                axes[0].set_title(f"Source")
-                axes[1].set_title(f"Mask")
-                axes[2].set_title(f"Editing scale: {scale}")
-                axes[3].set_title(f"Editing scale: {scale}")
-
-                # plt.title(f"prompt: {prompt}", loc="left")
-
-                plt.show()
+@contextmanager
+def timethis(name):
+    start = time.time()
+    try:
+        yield
+    finally:
+        end = time.time()
+        print(f"{name} took {end - start} seconds")
 
 
 if __name__ == '__main__':
-    main()
+    with timethis("main"):
+        main()
 
 
