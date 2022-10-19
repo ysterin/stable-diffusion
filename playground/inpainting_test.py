@@ -158,15 +158,32 @@ def crop_to_shape(image, height, width):
     print(image.shape)
     return image
 
+
+def crop_center_top(image, height, width):
+    img_height, img_width = image.shape[:2]
+    image = image[:height, img_width // 2 - width // 2:img_width // 2 + width // 2]
+    return image
+
+
+def paste_center_top(image, crop):
+    image = image.copy()
+    height, width = crop.shape[:2]
+    img_height, img_width = image.shape[:2]
+    image[:height, img_width // 2 - width // 2:img_width // 2 + width // 2] = crop
+    return image
+
+
 def main():
     seed = 4642326
     batch_size = 1
-    ddim_steps = 50
-    denoising_strength = 0.3
-    scale = 20
+    ddim_steps = 100
+    denoising_strength = 0.35
+    scale = 15
 
     seed_everything(seed)
     H, W, C, f = 1024, 640, 4, 8
+    H, W, C, f = 1280 + 64 + 64, 960, 4, 8
+    face_crop_size = 512
 
     # prompt = "An apartment complex in the city"
     prompt = "a baby sitting on a bench"
@@ -174,10 +191,6 @@ def main():
     prompt = "Emma Watson, studio lightning, realistic, fashion photoshoot, asos, perfect face, symmetric face"
     prompt = "shukistern guy"
     negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, unrealistic, imaginative"
-    # scale_factor = max(H / source_image.shape[0], W / source_image.shape[1])
-    # mask = cv2.resize(mask, (0, 0), fx=scale_factor, fy=scale_factor)
-    # mask = mask[:H]
-    # H, W = source_image.shape[:2]
 
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
     model = load_model_from_config(config, "../models/ldm/stable-diffusion-v1/model_shuki1.ckpt")
@@ -186,56 +199,78 @@ def main():
     model = model.to(device)
 
     cropped_dir = '../assets/sample_images/fashion_images/full body/uncropped'
-    outputs_dir = f"outputs/inpainting/fashion_images/full body/{prompt.replace(' ', '_')}"
+    outputs_dir = f"outputs/inpainting/fashion_images/prompts/{prompt.replace(' ', '_')}"
     os.makedirs(outputs_dir, exist_ok=True)
-    image_name = "abjx300603_billabong,w_mul_frt1"
-    image_name = "H_M"
-    image_name = "Terminal_tank_1"
     mask_name = "body"
     mask_dilation = 8
     image_list = ["Terminal_tank_1", "Terminal_tank_2", "Terminal_tank_3"]
+
     for image_name in image_list:
         source_image_path = os.path.join(cropped_dir, image_name + '.png')
-        face_mask_path = os.path.join(cropped_dir, f"{image_name}_{mask_name}.png")
+        body_mask_path = os.path.join(cropped_dir, f"{image_name}_body.png")
+        head_mask_path = os.path.join(cropped_dir, f"{image_name}_head.png")
         source_image = cv2.imread(source_image_path)
         source_image = cv2.cvtColor(source_image, cv2.COLOR_BGR2RGB)
-        mask = cv2.imread(face_mask_path, cv2.IMREAD_GRAYSCALE)
+        mask = cv2.imread(body_mask_path, cv2.IMREAD_GRAYSCALE)
+        head_mask = cv2.imread(head_mask_path, cv2.IMREAD_GRAYSCALE)
 
         plt.imshow(source_image)
         plt.show()
 
         source_image = crop_to_shape(source_image, H, W)
         mask = crop_to_shape(mask, H, W)
+        head_mask = crop_to_shape(head_mask, H, W)
 
         mask = dilate_mask(mask, kernel_size=mask_dilation)
+        head_mask = dilate_mask(head_mask, kernel_size=mask_dilation)
 
-        mask, recon_image = inpaint_image(source_image, mask, model, prompt, negative_prompt,
-                                          ddim_steps=ddim_steps, denoising_strength=denoising_strength,
-                                          cfg_scale=scale, device=device)
+        face_crop_mask = crop_center_top(head_mask, face_crop_size, face_crop_size)
 
-        fig, axes = plt.subplots(1, 4, figsize=(40, 10))
-        axes[0].imshow(source_image)
-        axes[1].imshow(mask.detach().cpu().numpy())
-        axes[2].imshow(recon_image[0])
+        for scale in [10, 12.5, 15, 20]:
+            for denoising_strength in [0.2, 0.3, 0.35, 0.4, 0.5]:
+                _, recon_image = inpaint_image(source_image, mask, model, prompt, negative_prompt,
+                                                  ddim_steps=ddim_steps, denoising_strength=denoising_strength,
+                                                  cfg_scale=scale, device=device)
 
-        # axes[3].imshow(recon_image_1[0])
-        axes[0].set_title(f"Source")
-        axes[1].set_title(f"Mask")
-        axes[2].set_title(f"Editing scale: {scale}")
-        axes[3].set_title(f"Editing scale: {scale}")
+                face_crop = crop_center_top(recon_image[0], face_crop_size, face_crop_size).copy()
 
-        # plt.title(f"prompt: {prompt}", loc="left")
+                _, recon_face_crop = inpaint_image(face_crop, face_crop_mask, model, prompt, negative_prompt,
+                                                    ddim_steps=ddim_steps, denoising_strength=denoising_strength,
+                                                    cfg_scale=scale, device=device)
 
-        plt.show()
-        rec_img = cv2.cvtColor(recon_image[0], cv2.COLOR_RGB2BGR)
-        # rec_img_1 = cv2.cvtColor(recon_image_1[0], cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}.png"), rec_img)
-        # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_1.png"), rec_img_1)
+                w = 3
+                recon_face_crop[:, w] = 0
+                recon_face_crop[:, -w:] = 0
+                recon_face_crop[:, :, :w] = 0
+                recon_face_crop[:, :, -w:] = 0
+                recon_image_pasted = paste_center_top(recon_image[0], recon_face_crop[0])
+
+                fig, axes = plt.subplots(1, 4, figsize=(60, 15))
+                axes[0].imshow(source_image)
+                axes[1].imshow(mask)
+                axes[2].imshow(recon_image[0])
+                axes[3].imshow(recon_image_pasted)
+
+                # axes[3].imshow(recon_image_1[0])
+                axes[0].set_title(f"Source")
+                axes[1].set_title(f"Mask")
+                axes[2].set_title(f"Editing scale: {scale}")
+                axes[3].set_title(f"Editing scale: {scale}")
+
+                # plt.title(f"prompt: {prompt}", loc="left")
+
+                plt.show()
+                rec_img = cv2.cvtColor(recon_image[0], cv2.COLOR_RGB2BGR)
+                rec_img_pasted = cv2.cvtColor(recon_image_pasted, cv2.COLOR_RGB2BGR)
+                # rec_img_1 = cv2.cvtColor(recon_image_1[0], cv2.COLOR_RGB2BGR)
+                cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_{ddim_steps}_{H}_{W}.png"), rec_img)
+                cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_pasted.png"), rec_img_pasted)
+                # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_1.png"), rec_img_1)
 
 
 def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps, denoising_strength=0.5, cfg_scale=10,
                   device='cuda', batch_size=1, alpha=0):
-    masked_image = (source_image * (1 - mask[:, :, None] / 255) + mask[:, :, None]).astype(np.uint8)
+    # masked_image = (source_image * (1 - mask[:, :, None] / 255) + mask[:, :, None]).astype(np.uint8)
     n_steps = int(denoising_strength * ddim_steps)
     # fig, axes = plt.subplots(1, 3)
     # axes[0].imshow(source_image)
