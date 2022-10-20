@@ -159,14 +159,18 @@ def crop_to_shape(image, height, width):
     return image
 
 
-def crop_center_top(image, height, width):
+def crop_center_top(image, height, width, size_scale=1.0):
     img_height, img_width = image.shape[:2]
     image = image[:height, img_width // 2 - width // 2:img_width // 2 + width // 2]
+    if size_scale != 1.0:
+        image = cv2.resize(image, dsize=None, fx=size_scale, fy=size_scale, interpolation=cv2.INTER_LINEAR)
     return image
 
 
-def paste_center_top(image, crop):
+def paste_center_top(image, crop, size_scale=1.0):
     image = image.copy()
+    if size_scale != 1.0:
+        crop = cv2.resize(crop, dsize=None, fx=1/size_scale, fy=1/size_scale, interpolation=cv2.INTER_LINEAR)
     height, width = crop.shape[:2]
     img_height, img_width = image.shape[:2]
     image[:height, img_width // 2 - width // 2:img_width // 2 + width // 2] = crop
@@ -181,15 +185,20 @@ def main():
     scale = 15
 
     seed_everything(seed)
-    H, W, C, f = 1024, 640, 4, 8
+    # H, W, C, f = 960, 640, 4, 8
+    # face_crop_size = 256
+    # face_crop_scale = 2.0
+
     H, W, C, f = 1280 + 64 + 64, 960, 4, 8
     face_crop_size = 512
+    face_crop_scale = 2.0
 
     # prompt = "An apartment complex in the city"
     prompt = "a baby sitting on a bench"
     # prompt = "a green bench in a park"
     prompt = "Emma Watson, studio lightning, realistic, fashion photoshoot, asos, perfect face, symmetric face"
     prompt = "shukistern guy"
+    # prompt = "Barack Obama"
     negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, unrealistic, imaginative"
 
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
@@ -224,52 +233,76 @@ def main():
         mask = dilate_mask(mask, kernel_size=mask_dilation)
         head_mask = dilate_mask(head_mask, kernel_size=mask_dilation)
 
-        face_crop_mask = crop_center_top(head_mask, face_crop_size, face_crop_size)
+        face_crop_mask_1 = crop_center_top(head_mask, face_crop_size, face_crop_size, size_scale=1.0)
+        face_crop_mask_2 = crop_center_top(head_mask, face_crop_size, face_crop_size, size_scale=2.0)
 
-        for scale in [10, 12.5, 15, 20]:
-            for denoising_strength in [0.2, 0.3, 0.35, 0.4, 0.5]:
+        for scale in [10, 15, 20][1:]:
+            for denoising_strength in [0.2, 0.3, 0.35, 0.4, 0.5][2:]:
                 _, recon_image = inpaint_image(source_image, mask, model, prompt, negative_prompt,
                                                   ddim_steps=ddim_steps, denoising_strength=denoising_strength,
                                                   cfg_scale=scale, device=device)
 
-                face_crop = crop_center_top(recon_image[0], face_crop_size, face_crop_size).copy()
+                face_crop_1 = crop_center_top(recon_image[0].copy(), face_crop_size, face_crop_size, size_scale=1.0).copy()
+                face_crop_2 = crop_center_top(recon_image[0].copy(), face_crop_size, face_crop_size, size_scale=2.0).copy()
 
-                _, recon_face_crop = inpaint_image(face_crop, face_crop_mask, model, prompt, negative_prompt,
+                _, recon_face_crop_1 = inpaint_image(face_crop_1, face_crop_mask_1, model, prompt, negative_prompt,
                                                     ddim_steps=ddim_steps, denoising_strength=denoising_strength,
                                                     cfg_scale=scale, device=device)
 
+                _, recon_face_crop_2 = inpaint_image(face_crop_2, face_crop_mask_2, model, prompt, negative_prompt,
+                                                    ddim_steps=ddim_steps, denoising_strength=denoising_strength,
+                                                    cfg_scale=scale, device=device)
+
+
+                # combined_image = (0.5 * source_image + 0.5 * recon_image[0]).astype(np.uint8)
                 w = 3
-                recon_face_crop[:, w] = 0
-                recon_face_crop[:, -w:] = 0
-                recon_face_crop[:, :, :w] = 0
-                recon_face_crop[:, :, -w:] = 0
-                recon_image_pasted = paste_center_top(recon_image[0], recon_face_crop[0])
+                # recon_face_crop[:, w] = 0
+                # recon_face_crop[:, -w:] = 0
+                # recon_face_crop[:, :, :w] = 0
+                # recon_face_crop[:, :, -w:] = 0
+                recon_face_crop_1[:, w] = 0
+                recon_face_crop_1[:, -w:] = 0
+                recon_face_crop_1[:, :, :w] = 0
+                recon_face_crop_1[:, :, -w:] = 0
+                recon_face_crop_2[:, w] = 0
+                recon_face_crop_2[:, -w:] = 0
+                recon_face_crop_2[:, :, :w] = 0
+                recon_face_crop_2[:, :, -w:] = 0
 
-                fig, axes = plt.subplots(1, 4, figsize=(60, 15))
-                axes[0].imshow(source_image)
-                axes[1].imshow(mask)
-                axes[2].imshow(recon_image[0])
-                axes[3].imshow(recon_image_pasted)
 
-                # axes[3].imshow(recon_image_1[0])
-                axes[0].set_title(f"Source")
-                axes[1].set_title(f"Mask")
-                axes[2].set_title(f"Editing scale: {scale}")
-                axes[3].set_title(f"Editing scale: {scale}")
+                recon_image_pasted_1 = paste_center_top(recon_image[0], recon_face_crop_1[0], size_scale=1.0)
+                recon_image_pasted_2 = paste_center_top(recon_image[0], recon_face_crop_2[0], size_scale=2.0)
+
+                # fig, axes = plt.subplots(1, 5, figsize=(60, 15))
+                # axes[0].imshow(source_image)
+                # axes[1].imshow(mask)
+                # axes[2].imshow(recon_image[0])
+                # axes[3].imshow(recon_image_pasted)
+                # axes[4].imshow(combined_image)
+                #
+                # # axes[3].imshow(recon_image_1[0])
+                # axes[0].set_title(f"Source")
+                # axes[1].set_title(f"Mask")
+                # axes[2].set_title(f"Editing scale: {scale}")
+                # axes[3].set_title(f"Editing scale: {scale}")
 
                 # plt.title(f"prompt: {prompt}", loc="left")
 
                 plt.show()
                 rec_img = cv2.cvtColor(recon_image[0], cv2.COLOR_RGB2BGR)
-                rec_img_pasted = cv2.cvtColor(recon_image_pasted, cv2.COLOR_RGB2BGR)
+                rec_img_pasted_1 = cv2.cvtColor(recon_image_pasted_1, cv2.COLOR_RGB2BGR)
+                rec_img_pasted_2 = cv2.cvtColor(recon_image_pasted_2, cv2.COLOR_RGB2BGR)
                 # rec_img_1 = cv2.cvtColor(recon_image_1[0], cv2.COLOR_RGB2BGR)
                 cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_{ddim_steps}_{H}_{W}.png"), rec_img)
-                cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_pasted.png"), rec_img_pasted)
+                cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_pasted_1.png"), rec_img_pasted_1)
+                cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_pasted_2.png"), rec_img_pasted_2)
+
+                # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_combined.png"), combined_img)
                 # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{denoising_strength}_{scale}_1.png"), rec_img_1)
 
 
 def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps, denoising_strength=0.5, cfg_scale=10,
-                  device='cuda', batch_size=1, alpha=0):
+                  device='cuda', batch_size=1, alpha=0, batch_cond_uncond=False):
     # masked_image = (source_image * (1 - mask[:, :, None] / 255) + mask[:, :, None]).astype(np.uint8)
     n_steps = int(denoising_strength * ddim_steps)
     # fig, axes = plt.subplots(1, 3)
@@ -277,7 +310,7 @@ def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps
     # axes[1].imshow(mask)
     # axes[2].imshow(masked_image)
     # plt.show()
-    dnw = CFGCompVisDenoiser(model.to(device), batch_cond_uncond=False, device=device)
+    dnw = CFGCompVisDenoiser(model.to(device), batch_cond_uncond=batch_cond_uncond, device=device)
     sigmas = dnw.get_sigmas(ddim_steps).to(device)
     sigmas[-1] = 1e-5
     sample_fn = lambda *args, **kwargs: sample_euler_inpainting(*args, **kwargs, s_noise=1.0, mcg_alpha=alpha)
