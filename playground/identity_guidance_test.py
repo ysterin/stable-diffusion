@@ -162,7 +162,7 @@ def l2_loss_guidance_func(original, model, grad_scale=1e-3, target="image", devi
             x_0 = rearrange(x_0, "b c h w -> b h w c")
         with torch.enable_grad():
             loss = ((x_0 - original) ** 2).mean()
-            grad = - torch.autograd.grad(loss, x)[0]  # / K.utils.append_dims(sigma, x.ndim)
+            grad = - torch.autograd.grad(loss, x)[0]  # / K.utils_files.append_dims(sigma, x.ndim)
         if target == 'latent':
             grad /= K.utils.append_dims(sigma ** 2, x.ndim)
         print(f"loss: {loss}")

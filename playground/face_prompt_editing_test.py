@@ -62,7 +62,7 @@ def make_mcg_guidance_fn(alpha=1.0):
             return torch.zeros_like(x)
         sigma = K.utils.append_dims(sigma, x.ndim)
         c_in = 1 / (sigma ** 2 + 1) ** 0.5
-        # c_in = K.utils.append_dims(c_in, x.ndim)
+        # c_in = K.utils_files.append_dims(c_in, x.ndim)
         mask = 1.0 - kwargs["mask"]
         y_0 = kwargs["source"]
         masked_y0 = y_0 * mask

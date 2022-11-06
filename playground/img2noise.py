@@ -81,7 +81,7 @@ def find_noise_for_image(model, images, prompt, latent=None, steps=200, cond_sca
                 #     sigma_in = sigmas[i - 1] * s_in
                 #     cond_in = cond
                 #
-                #     c_out, c_in = [K.utils.append_dims(k, x_in.ndim) for k in dnw.get_scalings(sigma_in)]
+                #     c_out, c_in = [K.utils_files.append_dims(k, x_in.ndim) for k in dnw.get_scalings(sigma_in)]
                 #     t = dnw.sigma_to_t(sigma_in)
                 #     eps = model.apply_model(x_in * c_in, t, cond=cond_in)
 

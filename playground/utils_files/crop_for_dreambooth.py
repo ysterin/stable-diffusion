@@ -4,9 +4,9 @@ import glob
 import numpy as np
 
 # root_dir = "/Users/shukistern/PycharmProjects/stable-diffusion"
-root_dir = "../.."
-images_dir = root_dir + '/assets/dreambooth images/sapir'
-save_dir = root_dir + '/assets/dreambooth images/sapir_cropped'
+root_dir = "../../../data/dreambooth"
+images_dir = root_dir + '/gal'
+save_dir = root_dir + '/gal_cropped'
 
 os.makedirs(save_dir, exist_ok=True)
 
