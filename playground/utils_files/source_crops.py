@@ -193,12 +193,14 @@ def tensorflow_transform(img, tx, ty, scale_x, scale_y, dst_width, dst_height, i
     return img_trans, T
 
 
-def get_3ddfa_face_crop(face_kp, img, target_scale=210, target_center_y=255):
+def get_3ddfa_face_crop(face_kp, img, target_scale=210, target_center_y=0.5, target_center_x=0.5, dst_width=512, dst_height=512):
     # target_scale = 60.0 * 3.5  # 2
-    target_center_x = 127.5 * 2
+    target_center_x *= dst_width
+    target_center_y *= dst_height
+    target_scale *= (dst_width / 512)
     # target_center_y = 127.5 * 2
-    dst_width = 256 * 2
-    dst_height = 256 * 2
+    # dst_width = 256 * 2
+    # dst_height = 256 * 2
 
     diff_x, diff_y, transform_scale, transformation_vertices_func, \
         transformed_landmark = preprocess_3dmm(

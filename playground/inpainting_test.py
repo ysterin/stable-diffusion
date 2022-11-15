@@ -25,6 +25,7 @@ from matplotlib import pyplot as plt
 from img2noise import find_noise_for_image, find_noise_for_latent, pil_img_to_latent, pil_img_to_torch
 from PIL import Image
 import cv2
+import copy
 from torch import autocast
 from einops import rearrange, repeat
 from tqdm import trange
@@ -95,6 +96,7 @@ def dilate_mask(mask, kernel_size=2):
     mask = (mask > 0).astype(np.uint8)
     return mask
 
+
 @torch.no_grad()
 def sample_euler_inpainting(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0.,
                             s_tmax=float('inf'), s_noise=1., x_0=None, mask=None, mcg_alpha=0.0):
@@ -135,15 +137,16 @@ def sample_euler_inpainting(model, x, sigmas, extra_args=None, callback=None, di
                     mcg_grad = torch.autograd.grad(mcg_loss, x_prev)[0]
 
                     # cond_grad = mcg_guidance(x_prev, sigma_hat, denoised=denoised, mask=mask, source=x_0).detach()
-                x = x - mcg_alpha * mcg_grad * (1 - mask) / (c_in)
+                x = x - (mcg_alpha * mcg_grad * (1 - mask) / (c_in))  # .clip(-0.3, 0.3)
                 print(f"cond_grad: {mcg_grad.abs().mean().item()}")
-                print(f"cond_grad * mask / (c_in * c_in_1): {(mcg_alpha * mcg_grad * mask / (c_in * c_in_1)).std().item()}")
+                print(f"cond_grad * mask / (c_in * c_in_1): {(mcg_alpha * mcg_grad * mask / (c_in)).std().item()}")
 
             x_noised = x_0 + torch.randn_like(x_0) * K.utils.append_dims(sigmas[i + 1], x_0.ndim)
             x = x * (1 - mask) + x_noised * mask
             # x = x * mask + x_noised * (1 - mask)
 
     return x
+
 
 def crop_to_shape(image, height, width):
     img_height, img_width = image.shape[:2]
@@ -157,9 +160,10 @@ def crop_to_shape(image, height, width):
         img_width = new_width
         scale_factor = width / img_width
     aspect_ratio = img_width / img_height
-    assert np.allclose(aspect_ratio, width / height, rtol=0.02), f"Aspect ratio mismatch: {aspect_ratio} != {width / height}, " \
-                                           f"img_width: {img_width}, img_height: {img_height}"
-    image = cv2.resize(image, dsize=(width, height), interpolation= cv2.INTER_LINEAR)
+    assert np.allclose(aspect_ratio, width / height,
+                       rtol=0.02), f"Aspect ratio mismatch: {aspect_ratio} != {width / height}, " \
+                                   f"img_width: {img_width}, img_height: {img_height}"
+    image = cv2.resize(image, dsize=(width, height), interpolation=cv2.INTER_LINEAR)
     print(image.shape)
     return image
 
@@ -198,6 +202,7 @@ def warp_im_alphapose(img, mask, clothes_mask, head_mask, human_alpha, human_fac
     def prepare_kp_for_transofrm(kp_array):
         kp = [[kp_i[:2]] for kp_i in kp_array]
         return np.array(kp)
+
     body_kp_no_conf = prepare_kp_for_transofrm(body_kp)
     face_kp_no_conf = prepare_kp_for_transofrm(face_kp)
     face_pca_head_bbox_forT = np.array([[face_pca_head_bbox[:2]], [face_pca_head_bbox[2:]]], dtype=float)
@@ -208,7 +213,8 @@ def warp_im_alphapose(img, mask, clothes_mask, head_mask, human_alpha, human_fac
     warped_face_kp = np.array([warped_face_kp[i, 0] for i in range(len(warped_face_kp))])
     warped_face_pca_head_bbox = cv2.perspectiveTransform(face_pca_head_bbox_forT, rot_mat3d)
 
-    return warped_im, warped_mask, warped_clothes_mask, warped_head_mask, warped_body_kp, warped_face_kp, warped_face_pca_head_bbox.flatten().astype(int)
+    return warped_im, warped_mask, warped_clothes_mask, warped_head_mask, warped_body_kp, warped_face_kp, warped_face_pca_head_bbox.flatten().astype(
+        int)
 
 
 def warp_to_shape(image, height, width):
@@ -262,6 +268,7 @@ def invert_warp_to_paste(image, crop, crop_mask, warp_mat, H, W):
     pasted_image = part1 + part2
     return pasted_image.astype(np.uint8)
 
+
 #            mask_no_headcrop = invert_warp_to_paste(mask[..., None]*255, np.zeros_like(head_crop)*255,
 #                                                                  np.zeros_like(warped_head_mask),
 #                                                                  warp_mat3d_to_head, H, W)
@@ -278,7 +285,7 @@ def crop_center_top(image, height, width, size_scale=1.0):
 def paste_center_top(image, crop, size_scale=1.0):
     image = image.copy()
     if size_scale != 1.0:
-        crop = cv2.resize(crop, dsize=None, fx=1/size_scale, fy=1/size_scale, interpolation=cv2.INTER_LINEAR)
+        crop = cv2.resize(crop, dsize=None, fx=1 / size_scale, fy=1 / size_scale, interpolation=cv2.INTER_LINEAR)
     height, width = crop.shape[:2]
     img_height, img_width = image.shape[:2]
     image[:height, img_width // 2 - width // 2:img_width // 2 + width // 2] = crop
@@ -309,7 +316,8 @@ def enlarge_bbox(bbox, img_h, img_w, x_diff, y_diff):
     return np.array([x1, y1, x2, y2]).astype(int)
 
 
-def get_warp_mat_to_crop(source_image, body_kp, face_kp, face_pca_head_bbox, enlarge_by=0.7, target_scale=210, target_center_y=255):
+def get_warp_mat_to_crop(source_image, body_kp, face_kp, face_pca_head_bbox, enlarge_by=0.7, target_scale=210,
+                         target_center_y=255):
     if body_kp[0, 2] > 0.1 and body_kp[1, 2] > 0.1 and body_kp[2, 2] > 0.1:
         print(f"warp mat to face by tddfa")
         img_face, warp_mat3d = get_3ddfa_face_crop(face_kp, source_image, target_scale, target_center_y)
@@ -343,16 +351,64 @@ def get_warp_im(img, warp_mat3d, dst_width=512, dst_height=512):
     return img_trans
 
 
-def get_crop_by_head(source_image, body_kp, face_kp, face_pca_head_bbox, enlarge_by=0.7, target_scale=210, target_center_y=255):
+def get_default_upsampler():
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+    from basicsr.utils.download_util import load_file_from_url
+    from realesrgan import RealESRGANer
+    from realesrgan.archs.srvgg_arch import SRVGGNetCompact
+
+    realesrgan_root = "/home/shuki/sources/Real-ESRGAN"
+    model_name = "RealESRGAN_x4plus"
+    model_path = os.path.join(realesrgan_root, 'weights', model_name + '.pth')
+
+    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+    netscale = 4
+    file_url = ['https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth']
+
+    dni_weight = None
+    tile = 0
+    tile_pad = 10
+    pre_pad = 0
+    fp32 = False
+    gpu_id = 0
+
+    upsampler = RealESRGANer(
+        scale=netscale,
+        model_path=model_path,
+        dni_weight=dni_weight,
+        model=model,
+        tile=tile,
+        tile_pad=tile_pad,
+        pre_pad=pre_pad,
+        half=not fp32,
+        gpu_id=gpu_id)
+
+    return upsampler
+
+def get_warp_im_superresolution(img, warp_mat3d, dst_width=512, dst_height=512, upsampler=None):
+    upsample_scale = warp_mat3d[0, 0]
+    if upsample_scale <= 1.0:
+        return get_warp_im(img, warp_mat3d, dst_width, dst_height)
+    if upsampler is None:
+        upsampler = get_default_upsampler()
+    crop_width = int(dst_width / upsample_scale)
+    crop_height = int(dst_height / upsample_scale)
+    upsample_scale = dst_width / crop_width
+    img_crop = cv2.warpAffine(img, warp_mat3d[:2] / upsample_scale, (crop_width, crop_height))
+    img_crop_upsampled = upsampler.enhance(img_crop, outscale=upsample_scale)[0]
+    return img_crop_upsampled
+
+
+def get_crop_by_head(source_image, body_kp, face_kp, face_pca_head_bbox, enlarge_by=0.7, target_scale=210,
+                     target_center_y=0.5, target_width=512, target_height=512):
     if body_kp[0, 2] > 0.1 and body_kp[1, 2] > 0.1 and body_kp[2, 2] > 0.1:
         print(f"cropping face by tddfa")
         # face_kp = np.array(human_face['landmark']).T
         # new face_kp (shifted by alphapose bbox)
-        img_face, warp_mat3d = get_3ddfa_face_crop(face_kp, source_image, target_scale, target_center_y)
+        img_face, warp_mat3d = get_3ddfa_face_crop(face_kp, source_image, target_scale, target_center_y,
+                                                   dst_width=target_width, dst_height=target_height)
         return img_face, warp_mat3d
     else:
-        target_width = 512
-        target_height = 512
         print(f"cropping face by alphapose")
         # face_pca_head_bbox = np.array(human_face['head_bounding_box'])
         x1, y1, x2, y2 = enlarge_bbox(face_pca_head_bbox, source_image.shape[0], source_image.shape[1], enlarge_by,
@@ -396,26 +452,38 @@ def main():
     # face_crop_scale = 2.0
     # H, W, C, f = 960, 640, 4, 8
     # H, W, C, f = 1280 + 64 + 64, 960, 4, 8
-    H, W, C, f = 960, 640, 4, 8
+    # H, W, C, f = 1408, 768, 4, 8
+    # H, W, C, f = 960, 640, 4, 8
+    # H, W, C, f = 1536, 832, 4, 8
+    H, W, C, f = 1600, 832, 4, 8
+    head_width = head_height = 512
+    face_width = face_height = 512
     face_crop_size = 512
     face_crop_scale = 1.5
     use_head = True
     use_face = True
     use_init_head = False
+    do_body_background_reconstruction = False
+    do_superresolution = False
     body_denoising_strength = 0.5
     head_denoising_strength = 0.65
     face_denoising_strength = 0.5  # 0.35
-    scale = 20
+    bodyhead_mcg_alpha = -1e-1
+    bodyheadface_mcg_alpha = -1e-1
+    scale = 15
+    upsampler = get_default_upsampler()
     # prompt = "An apartment complex in the city"
     # prompt = "a baby sitting on a bench"
     # prompt = "a green bench in a park"
     # prompt = "Emma Watson, studio lightning, realistic, fashion photoshoot, asos, perfect face, symmetric face"
-    prompt = "qwv man, german, european, caucasian, bright skin"
+    prompt = "qwv man, german, european, caucasian"
+    prompt = "qwv man"
     negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, unrealistic, imaginative, african, blurry"
 
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
     model_name = "avi_dual_face_3ddfa_qwv"
-    model = load_model_from_config(config, f"../../dreambooth_sd/stable_diffusion_weights/{model_name}/model.ckpt")
+    # model = load_model_from_config(config, f"../../dreambooth_sd/stable_diffusion_weights/{model_name}/model.ckpt")
+    model = load_model_from_config(config, f"../models/ldm/stable-diffusion-v1/dreambooth/{model_name}/model.ckpt")
     target_scales = [350, 210]  # depends on the crop. full head 210, tight face 350
     enlarge_bys = [0.2, 0.7]  # depende on the crop. full head 0.7, tight face 0.2
 
@@ -427,23 +495,33 @@ def main():
     use_face1 = [1, 1, 1]
     # image_list1 = ["Terminal_tank_3"]
     # use_face1 = [1]
-    num_ims_dir1 = len(image_list1)
 
     src_dir2 = '../assets/sample_images/fashion_images/target_ims/'
     src_video_alpha_info2, src_info_face_pca2 = get_alpha_and_face(src_dir2)
-    image_list2 = ["terminal_cauc_back",  "terminal_cauc_full", "terminal_cauc_side",
-                  "terminal_dark", "terminal_dark_back", "terminal_dark_big"]
+    image_list2 = ["terminal_cauc_back", "terminal_cauc_full", "terminal_cauc_side",
+                   "terminal_dark", "terminal_dark_back", "terminal_dark_big"]
     use_face2 = [0, 1, 1, 1, 0, 1]
     # image_list2 = ["terminal_dark", "terminal_dark_back", "terminal_dark_big"]
     # use_face2 = [1, 0, 1]
     # image_list2 = ["terminal_dark_back"]
     # use_face2 = [0]
 
+    idxs1 = [0]
+    idxs2 = [5]
+
+    # image_list1 = [image_list1[i] for i in idxs1]
+    # use_face1 = [use_face1[i] for i in idxs1]
+    # image_list2 = [image_list2[i] for i in idxs2]
+    # use_face2 = [use_face2[i] for i in idxs2]
+
+    num_ims_dir1 = len(image_list1)
+
+    use_faces = use_face1 + use_face2
     image_list = image_list1 + image_list2
+
     src_video_alpha_info, src_info_face_pca = src_video_alpha_info1, src_info_face_pca1
     src_video_alpha_info.update(src_video_alpha_info2)
     src_info_face_pca.update(src_info_face_pca2)
-    use_faces = use_face1 + use_face2
 
     outputs_dir = f"outputs/inpainting/fashion_images/prompts/{prompt.replace(' ', '_').replace(',', '')}/{model_name}_bodyheadface_detailed_prompt"
     os.makedirs(outputs_dir, exist_ok=True)
@@ -471,7 +549,7 @@ def main():
         head_mask = cv2.imread(head_mask_path, cv2.IMREAD_GRAYSCALE)
         clothes_mask = cv2.imread(clothes_mask_path, cv2.IMREAD_GRAYSCALE)
 
-        image_full_name = [im_name for im_name in src_video_alpha_info.keys() if image_name+'.' in im_name][0]
+        image_full_name = [im_name for im_name in src_video_alpha_info.keys() if image_name + '.' in im_name][0]
         frame_alpha_data = src_video_alpha_info[image_full_name]
         frame_face_data = src_info_face_pca[image_full_name]
         best_human_ind = get_best_human_ind(frame_alpha_data)
@@ -481,7 +559,7 @@ def main():
         source_image, mask, clothes_mask, warped_head_mask, warped_body_kp, warped_face_kp, warped_face_pca_head_bbox = \
             warp_im_alphapose(source_image, mask, clothes_mask, head_mask, human_alpha, human_face, H, W)
 
-        mask = dilate_mask(mask, kernel_size=mask_dilation//2)
+        mask = dilate_mask(mask, kernel_size=mask_dilation // 2)
         mask = (1 - clothes_mask // 255) * mask  # restricted
 
         body_kp = warped_body_kp
@@ -496,11 +574,14 @@ def main():
         if use_head or use_init_head:
             head_image, warp_mat3d_to_head = get_crop_by_head(source_image, body_kp, face_kp,
                                                               face_pca_head_bbox, enlarge_by=enlarge_by_head,
-                                                              target_scale=target_scale_head, target_center_y=255)
-            head_crop_mask = get_warp_im(warped_head_mask / 255, warp_mat3d_to_head)
+                                                              target_scale=target_scale_head, target_center_y=0.5,
+                                                              target_width=head_width, target_height=head_height)
+            head_crop_mask = get_warp_im(warped_head_mask / 255, warp_mat3d_to_head, dst_width=head_width,
+                                         dst_height=head_height)
             head_crop_mask = dilate_mask(head_crop_mask, kernel_size=mask_dilation * 8)
 
-            head_crop_clothes_mask = get_warp_im(clothes_mask / 255, warp_mat3d_to_head)
+            head_crop_clothes_mask = get_warp_im(clothes_mask / 255, warp_mat3d_to_head, dst_width=head_width,
+                                                 dst_height=head_height)
             head_crop_mask = (1 - head_crop_clothes_mask) * head_crop_mask  # restricted
 
             # head_crop_skin_mask = get_warp_im(mask, warp_mat3d_to_head)
@@ -512,13 +593,21 @@ def main():
             #                                             warp_mat3d_to_head, H, W)
             if use_face and use_face_cur:
                 face_image, warp_mat3d_to_face = get_crop_by_head(source_image, body_kp, face_kp,
-                                                                   face_pca_head_bbox, enlarge_by=enlarge_by_face,
-                                                                   target_scale=target_scale_face, target_center_y=255)
+                                                                  face_pca_head_bbox, enlarge_by=enlarge_by_face,
+                                                                  target_scale=target_scale_face, target_center_y=0.5,
+                                                                  target_width=face_width, target_height=face_height)
 
-                face_crop_mask = get_warp_im(warped_head_mask / 255, warp_mat3d_to_face)
-                face_crop_mask = dilate_mask(face_crop_mask, kernel_size=mask_dilation * 8)
-                face_crop_clothes_mask = get_warp_im(clothes_mask / 255, warp_mat3d_to_face)
+                warp_mat3d_head_to_face = warp_mat3d_to_face @ np.linalg.inv(warp_mat3d_to_head)
+                face_crop_mask = get_warp_im(warped_head_mask / 255, warp_mat3d_to_face, dst_width=face_width,
+                                             dst_height=face_height)
+                face_crop_mask = dilate_mask(face_crop_mask, kernel_size=mask_dilation * 4)
+                face_crop_clothes_mask = get_warp_im(clothes_mask / 255, warp_mat3d_to_face, dst_width=face_width,
+                                                     dst_height=face_height)
                 face_crop_mask = (1 - face_crop_clothes_mask) * face_crop_mask  # restricted
+                boundary_mask = np.zeros_like(face_crop_mask)
+                face_h, face_w = face_crop_mask.shape
+                boundary_mask[face_h // 8:face_h * 7 // 8, face_w // 8:face_w * 7 // 8] = 1
+                face_crop_mask = face_crop_mask * boundary_mask
                 # pasted_face_body = invert_warp_to_paste(source_image_warped, face_image,
                 #                                             face_crop_mask,
                 #                                             warp_mat3d_to_face, H, W)
@@ -529,41 +618,38 @@ def main():
                 #                                             face_crop_mask,
                 #                                             warp_mat3d_to_face, H, W)
 
-        # for scale in tqdm([20, 30], 'scales'):
-        # for face_denoising_strength in tqdm([0.5, 0.65, 0.8], 'noises'):
-        # for body_denoising_strength in tqdm([0.6, 0.7, 0.8, 0.9], 'body noises'):  # [0.3, 0.35, 0.4, 0.45, 0.5]
-
         if use_init_head:
             _, recon_crop_head = inpaint_image(head_image, head_crop_mask, model, prompt, negative_prompt,
-                                                ddim_steps=ddim_steps, denoising_strength=head_denoising_strength,
-                                                cfg_scale=scale, device=device)
+                                               ddim_steps=ddim_steps, denoising_strength=head_denoising_strength,
+                                               cfg_scale=scale, device=device)
             source_image_pasted_head = invert_warp_to_paste(source_image.copy(), recon_crop_head[0],
-                                                                 head_crop_mask,
-                                                                 warp_mat3d_to_head, H, W)
+                                                            head_crop_mask,
+                                                            warp_mat3d_to_head, H, W)
             _, recon_image = inpaint_image(source_image_pasted_head.copy(), mask.copy(), model, prompt, negative_prompt,
-                                              ddim_steps=ddim_steps, denoising_strength=body_denoising_strength,
-                                              cfg_scale=scale, device=device)
+                                           ddim_steps=ddim_steps, denoising_strength=body_denoising_strength,
+                                           cfg_scale=scale, device=device)
         else:
             _, recon_image = inpaint_image(source_image.copy(), mask.copy(), model, prompt, negative_prompt,
                                            ddim_steps=ddim_steps, denoising_strength=body_denoising_strength,
-                                           cfg_scale=scale, device=device)
-        # _, recon_image_sqr = inpaint_image(recon_image[0].copy(), mask.copy(), model, prompt, negative_prompt,
-        #                                   ddim_steps=ddim_steps, denoising_strength=0.4,
-        #                                   cfg_scale=scale, device=device)
-        # _, recon_image_sqr3 = inpaint_image(recon_image_sqr[0].copy(), mask.copy(), model, prompt, negative_prompt,
-        #                                   ddim_steps=ddim_steps, denoising_strength=0.4,
-        #                                   cfg_scale=scale, device=device)
+                                           cfg_scale=scale, device=device,
+                                           do_background_reconstruction=do_body_background_reconstruction,
+                                           image_name=image_name + '_body')
         if use_head:
-            # _, recon_face_crop_head = inpaint_image(head_image, head_crop_mask, model, prompt, negative_prompt,
-            #                                     ddim_steps=ddim_steps, denoising_strength=denoising_strength,
-            #                                     cfg_scale=scale, device=device)
+            if do_superresolution:
+                head_crop = get_warp_im_superresolution(recon_image[0].copy(), warp_mat3d_to_head, dst_height=head_height,
+                                                        dst_width=head_width, upsampler=upsampler)
+            else:
+                head_crop = get_warp_im(recon_image[0].copy(), warp_mat3d_to_head, dst_height=head_height,
+                                        dst_width=head_width)
 
-            head_crop = get_warp_im(recon_image[0].copy(), warp_mat3d_to_head)
             _, recon_face_crop_bodyhead = inpaint_image(head_crop, head_crop_mask, model, prompt, negative_prompt,
-                                                ddim_steps=ddim_steps, denoising_strength=head_denoising_strength,
-                                                cfg_scale=scale, device=device)
+                                                        ddim_steps=ddim_steps,
+                                                        denoising_strength=head_denoising_strength,
+                                                        cfg_scale=scale, device=device, alpha=bodyhead_mcg_alpha,
+                                                        do_background_reconstruction=True,
+                                                        image_name=image_name + '_head')
             recon_image_pasted_headtobody = invert_warp_to_paste(recon_image[0], recon_face_crop_bodyhead[0],
-                                                                 head_crop_mask,
+                                                                 np.ones_like(head_crop_mask),
                                                                  warp_mat3d_to_head, H, W)
 
             plt.imshow(head_crop)
@@ -572,25 +658,35 @@ def main():
             plt.show()
 
             if use_face and use_face_cur:
-                # _, recon_face_crop_face = inpaint_image(face_image, face_crop_mask, model, prompt, negative_prompt,
-                #                                     ddim_steps=ddim_steps, denoising_strength=denoising_strength,
-                #                                     cfg_scale=scale, device=device)
-                # face_crop = get_warp_im(recon_image[0].copy(), warp_mat3d_to_face)
-                # _, recon_face_crop_bodyface = inpaint_image(face_crop, face_crop_mask, model, prompt, negative_prompt,
-                #                                     ddim_steps=ddim_steps, denoising_strength=denoising_strength,
-                #                                     cfg_scale=scale, device=device)
-
-                face_crop_from_headbody = get_warp_im(recon_image_pasted_headtobody, warp_mat3d_to_face)
-                _, recon_face_crop_bodyheadface = inpaint_image(face_crop_from_headbody, face_crop_mask, model, prompt,
+                # face_crop_from_headbody = get_warp_im(recon_image_pasted_headtobody, warp_mat3d_to_face,
+                #                                       dst_height=face_height, dst_width=face_width)
+                # face_crop_from_head = get_warp_im(recon_face_crop_bodyhead[0], warp_mat3d_head_to_face,
+                #                                     dst_height=face_height, dst_width=face_width)
+                if do_superresolution:
+                    face_crop_from_head = get_warp_im_superresolution(recon_face_crop_bodyhead[0], warp_mat3d_head_to_face,
+                                                        dst_height=face_height, dst_width=face_width, upsampler=upsampler)
+                else:
+                    face_crop_from_head = get_warp_im(recon_face_crop_bodyhead[0], warp_mat3d_head_to_face,
+                                                      dst_height=face_height, dst_width=face_width)
+                _, recon_face_crop_bodyheadface = inpaint_image(face_crop_from_head, face_crop_mask, model, prompt,
                                                                 negative_prompt,
                                                                 ddim_steps=ddim_steps,
                                                                 denoising_strength=face_denoising_strength,
-                                                                cfg_scale=scale, device=device)
+                                                                cfg_scale=scale, device=device,
+                                                                alpha=bodyheadface_mcg_alpha,
+                                                                do_background_reconstruction=True,
+                                                                image_name=image_name + '_face')
+                # recon_image_pasted_facetoheadbody = invert_warp_to_paste(recon_image_pasted_headtobody,
+                #                                                          recon_face_crop_bodyheadface[0],
+                #                                                          face_crop_mask, warp_mat3d_to_face, H, W)
                 recon_image_pasted_facetoheadbody = invert_warp_to_paste(recon_image_pasted_headtobody,
                                                                          recon_face_crop_bodyheadface[0],
-                                                                         face_crop_mask, warp_mat3d_to_face, H, W)
+                                                                         np.ones_like(face_crop_mask),
+                                                                         warp_mat3d_to_face,
+                                                                         H, W)
+                # recon_image = recon_image_pasted_facetoheadbody
 
-        use_upscale = True
+        use_upscale = False
         if use_upscale:
             use_upscale_face = False
             if use_upscale_face:
@@ -599,10 +695,10 @@ def main():
                                                         head_crop_mask,
                                                         warp_mat3d_to_head, H, W)[..., 0]
 
-                mask_body_no_facecrop = invert_warp_to_paste(head_mask_source[..., None] * 255, np.zeros_like(face_crop_from_headbody) * 255,
-                                                        np.ones_like(face_crop_mask),
-                                                        warp_mat3d_to_face, H, W)[..., 0]
-
+                mask_body_no_facecrop = \
+                invert_warp_to_paste(head_mask_source[..., None] * 255, np.zeros_like(face_crop_from_headbody) * 255,
+                                     np.ones_like(face_crop_mask),
+                                     warp_mat3d_to_face, H, W)[..., 0]
 
                 mask_head_no_facecrop = get_warp_im(mask_body_no_facecrop, warp_mat3d_to_head)
                 head_crop_ofpasted = get_warp_im(recon_image_pasted_facetoheadbody, warp_mat3d_to_head)
@@ -613,24 +709,29 @@ def main():
                                                              ddim_steps=ddim_steps, denoising_strength=0.3,
                                                              cfg_scale=scale, device=device)
 
-            mask_no_headcrop = invert_warp_to_paste(mask[..., None]*255, np.zeros_like(head_crop)*255,
-                                                                 np.ones_like(head_crop_mask),
-                                                                 warp_mat3d_to_head, H, W)[..., 0]
+            mask_no_headcrop = invert_warp_to_paste(mask[..., None] * 255, np.zeros_like(head_crop) * 255,
+                                                    np.ones_like(head_crop_mask),
+                                                    warp_mat3d_to_head, H, W)[..., 0]
             # mask_no_head = invert_warp_to_paste(mask[..., None]*255, np.zeros_like(head_crop)*255,
             #                                                      head_crop_mask,
             #                                                      warp_mat3d_to_head, H, W)
             head_crop_ofpasted = get_warp_im(recon_image_pasted_facetoheadbody, warp_mat3d_to_head)
 
-
-            _, upscaled_body_recon_image05 = inpaint_image(recon_image_pasted_facetoheadbody.copy(), mask_no_headcrop.copy()/255, model, prompt, negative_prompt,
-                                           ddim_steps=ddim_steps, denoising_strength=0.5,
-                                           cfg_scale=scale, device=device)
-            _, upscaled_body_recon_image03 = inpaint_image(recon_image_pasted_facetoheadbody.copy(), mask_no_headcrop.copy()/255, model, prompt, negative_prompt,
-                                           ddim_steps=ddim_steps, denoising_strength=0.3,
-                                           cfg_scale=scale, device=device)
-            _, upscaled_body_recon_image01 = inpaint_image(recon_image_pasted_facetoheadbody.copy(), mask_no_headcrop.copy()/255, model, prompt, negative_prompt,
-                                           ddim_steps=ddim_steps, denoising_strength=0.1,
-                                           cfg_scale=scale, device=device)
+            _, upscaled_body_recon_image05 = inpaint_image(recon_image_pasted_facetoheadbody.copy(),
+                                                           mask_no_headcrop.copy() / 255, model, prompt,
+                                                           negative_prompt,
+                                                           ddim_steps=ddim_steps, denoising_strength=0.5,
+                                                           cfg_scale=scale, device=device)
+            _, upscaled_body_recon_image03 = inpaint_image(recon_image_pasted_facetoheadbody.copy(),
+                                                           mask_no_headcrop.copy() / 255, model, prompt,
+                                                           negative_prompt,
+                                                           ddim_steps=ddim_steps, denoising_strength=0.3,
+                                                           cfg_scale=scale, device=device)
+            _, upscaled_body_recon_image01 = inpaint_image(recon_image_pasted_facetoheadbody.copy(),
+                                                           mask_no_headcrop.copy() / 255, model, prompt,
+                                                           negative_prompt,
+                                                           ddim_steps=ddim_steps, denoising_strength=0.1,
+                                                           cfg_scale=scale, device=device)
             head_crop_ofpasted5 = get_warp_im(upscaled_body_recon_image05[0], warp_mat3d_to_head)
             head_crop_ofpasted3 = get_warp_im(upscaled_body_recon_image03[0], warp_mat3d_to_head)
             head_crop_ofpasted1 = get_warp_im(upscaled_body_recon_image01[0], warp_mat3d_to_head)
@@ -654,39 +755,23 @@ def main():
             plt.imshow(head_crop_ofpasted1)
             plt.show()
 
-            blended = recon_face_crop_bodyhead[0] * head_crop_mask[..., None] + head_crop_ofpasted5 * (1 - head_crop_mask[..., None])
+            blended = recon_face_crop_bodyhead[0] * head_crop_mask[..., None] + head_crop_ofpasted5 * (
+                        1 - head_crop_mask[..., None])
             plt.imshow(blended.astype(np.uint8))
             plt.show()
-        # # w = 3
-        # # # recon_face_crop_head[:, :w] = 0
-        # # # recon_face_crop_head[:, -w:] = 0
-        # # # recon_face_crop_head[:, :, :w] = 0
-        # # # recon_face_crop_head[:, :, -w:] = 0
-        # # # recon_face_crop_face[:, :w] = 0
-        # # # recon_face_crop_face[:, -w:] = 0
-        # # # recon_face_crop_face[:, :, :w] = 0
-        # # # recon_face_crop_face[:, :, -w:] = 0
-        # # recon_face_crop_bodyhead[:, :w] = 0
-        # # recon_face_crop_bodyhead[:, -w:] = 0
-        # # recon_face_crop_bodyhead[:, :, :w] = 0
-        # # recon_face_crop_bodyhead[:, :, -w:] = 0
-        # # # recon_face_crop_bodyface[:, :w] = 0
-        # # # recon_face_crop_bodyface[:, -w:] = 0
-        # # # recon_face_crop_bodyface[:, :, :w] = 0
-        # # # recon_face_crop_bodyface[:, :, -w:] = 0
-        # # recon_face_crop_bodyheadface[:, :w] = 0
-        # # recon_face_crop_bodyheadface[:, -w:] = 0
-        # # recon_face_crop_bodyheadface[:, :, :w] = 0
-        # # recon_face_crop_bodyheadface[:, :, -w:] = 0
         im_ind = 0
         if use_init_head:
             source_image_pasted_head = cv2.cvtColor(source_image_pasted_head, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_{head_denoising_strength}_"
-                                                  f"{face_denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_facepaste.png"), source_image_pasted_head)
+            cv2.imwrite(
+                os.path.join(outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_{head_denoising_strength}_"
+                                          f"{face_denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_facepaste.png"),
+                source_image_pasted_head)
             im_ind += 1
-        rec_img_body = cv2.cvtColor(recon_image[0], cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_{head_denoising_strength}_"
-                                              f"{face_denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_body_noise05.png"), rec_img_body)
+        rec_img_body = cv2.cvtColor(recon_image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(
+            os.path.join(outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_{head_denoising_strength}_"
+                                      f"{face_denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_body_noise05.png"),
+            rec_img_body)
         im_ind += 1
         # rec_img_bodysqr = cv2.cvtColor(recon_image_sqr[0], cv2.COLOR_RGB2BGR)
         # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{body_denoising_strength}_{face_denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_bodysqr_noise0504.png"), rec_img_bodysqr)
@@ -699,6 +784,14 @@ def main():
                 outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_{head_denoising_strength}_"
                              f"{face_denoising_strength}_{scale}_{ddim_steps}_"
                              f"{H}_{W}_pasted_bodyhead.png"), rec_img_pasted_headtobody)
+            head_image = cv2.cvtColor(head_crop, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{body_denoising_strength}_head_crop.png"), head_image)
+            im_ind += 1
+            recon_face_crop_bodyhead = cv2.cvtColor(recon_face_crop_bodyhead[0], cv2.COLOR_RGB2BGR)
+            cv2.imwrite(
+                os.path.join(outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_{head_denoising_strength}_"
+                                          f"{face_denoising_strength}_{scale}_{ddim_steps}_"
+                                          f"{H}_{W}_head.png"), recon_face_crop_bodyhead)
             im_ind += 1
             if use_face and use_face_cur:
                 rec_img_pasted_facetoheadbody = cv2.cvtColor(recon_image_pasted_facetoheadbody, cv2.COLOR_RGB2BGR)
@@ -706,6 +799,14 @@ def main():
                                                       f"{head_denoising_strength}_{face_denoising_strength}"
                                                       f"_{scale}_{ddim_steps}_{H}_{W}_pasted_bodyheadface.png"),
                             rec_img_pasted_facetoheadbody)
+                face_image = cv2.cvtColor(face_crop_from_head, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{body_denoising_strength}_face_crop.png"),
+                            face_image)
+                rec_img_facetoheadbody = cv2.cvtColor(recon_face_crop_bodyheadface[0], cv2.COLOR_RGB2BGR)
+                cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_"
+                                                        f"{head_denoising_strength}_{face_denoising_strength}"
+                                                        f"_{scale}_{ddim_steps}_{H}_{W}_face.png"),
+                            rec_img_facetoheadbody)
                 im_ind += 1
         # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{body_denoising_strength}_{denoising_strength}_{scale}_
         #   {ddim_steps}_{H}_{W}_pasted_head.png"), rec_img_pasted_1)
@@ -714,7 +815,8 @@ def main():
 
 
 def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps, denoising_strength=0.5, cfg_scale=10,
-                  device='cuda', batch_size=1, alpha=0, batch_cond_uncond=False):
+                  device='cuda', batch_size=1, alpha=0, batch_cond_uncond=False, do_background_reconstruction=False,
+                  image_name=None):
     # masked_image = (source_image * (1 - mask[:, :, None] / 255) + mask[:, :, None]).astype(np.uint8)
     n_steps = int(denoising_strength * ddim_steps)
     # fig, axes = plt.subplots(1, 3)
@@ -730,8 +832,8 @@ def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps
     # model.to('cpu')
     with torch.no_grad():
         with autocast('cuda', dtype=torch.float16):
-        # with nullcontext():
-        #     model.cond_stage_model.to(device)
+            # with nullcontext():
+            #     model.cond_stage_model.to(device)
             mask = torch.from_numpy(mask).to(device).float() / 255
             mask = mask.ceil()
             uc = model.get_learned_conditioning(batch_size * [""])
@@ -768,6 +870,11 @@ def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps
             # model.model.to('cpu')
             # model.first_stage_model.to(device)
             recon_image = model.decode_first_stage(recon_sample)
+            if do_background_reconstruction:
+                recon_image = background_reconstruction(latent=recon_sample, init_latent=init_latent,
+                                                        source_image=init_image,
+                                                        mask=mask, latent_mask=latent_mask, model=model,
+                                                        name=image_name)
             # model.first_stage_model.to('cpu')
             recon_image = rearrange(recon_image, 'b c h w -> b h w c')
 
@@ -776,6 +883,85 @@ def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps
             recon_image = np.clip(recon_image * 255, 0, 255).astype(np.uint8)
 
     return mask, recon_image
+
+
+def touint8(batch):
+    batch = batch.float().detach()
+    batch = (batch + 1.0) / 2.0
+    batch = batch.clamp(0, 1) * 255.0
+    batch = batch.permute(0, 2, 3, 1).cpu().numpy()
+    batch = batch.astype(np.uint8)
+    batch = batch[0]
+    return batch
+
+
+def background_reconstruction(latent, init_latent, source_image, mask, latent_mask, model,
+                              background_preservasion_weight=100, optimizer_fn=None,
+                              n_steps=250, lr=2e-2, gamma=0.8, n_stages=10, name=""):
+    # n_stages = 3
+    # gamma = 0.1
+
+    wandb.init(project="background_reconstruction")
+    wandb.config.update({"n_steps": n_steps, "lr": lr, "gamma": gamma, "n_stages": n_stages, "name": name,
+                         "background_preservasion_weight": background_preservasion_weight})
+    wandb.log({"source_image": wandb.Image(touint8(source_image))}, commit=False)
+    original_decoder_state_dict = copy.deepcopy(model.first_stage_model.decoder.state_dict())
+    # latent_mask = 1 - latent_mask
+    # mask = 1 - mask
+    latent = latent * latent_mask + init_latent * (1 - latent_mask)
+    latent = latent / model.scale_factor
+    latent = model.first_stage_model.post_quant_conv(latent)
+
+    edited_image = model.first_stage_model.decoder(latent)
+    wandb.log({"edited_image": wandb.Image(touint8(edited_image.clone()))}, commit=False)
+
+    latent = torch.autograd.Variable(latent.detach(), requires_grad=True)
+
+    with torch.enable_grad():
+        decoder = model.first_stage_model.decoder
+        decoder.train(True)
+        parameters = list(decoder.parameters())
+        [p.requires_grad_(True) for p in parameters]
+        if optimizer_fn is None:
+            optimizer = torch.optim.RAdam(parameters, lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+        else:
+            optimizer = optimizer_fn(parameters, lr=lr)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=n_steps // n_stages, gamma=gamma,
+                                                    verbose=False)
+        # optimizer = torch.optim.SGD([latent], lr=lr)
+
+        min_loss = 1e8
+        pbar = tqdm(range(n_steps), desc="Background reconstruction")
+        for i in pbar:
+            # recon_image = model.differentiable_decode_first_stage(latent)
+            recon_image = decoder(latent)
+            loss = ((recon_image - edited_image) * mask).pow(2).mean() + \
+                   ((recon_image - source_image) * (1 - mask)).pow(2).mean() * background_preservasion_weight
+            optimizer.zero_grad()
+            loss.backward()
+
+            if loss < min_loss:
+                min_loss = loss
+            elif loss > min_loss * 1.01 and i > n_steps * 0.15:
+                print("Loss increased, stopping")
+                break
+
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+
+            pbar.set_postfix(loss=loss.item())
+            if i % 10 == 0:
+                wandb.log({"recon_image": wandb.Image(touint8(recon_image.detach()))}, commit=False)
+
+            wandb.log({"loss": loss.item()})
+
+    recon_image = decoder(latent)
+    # recon_image = model.differentiable_decode_first_stage(latent)
+    model.first_stage_model.decoder.load_state_dict(original_decoder_state_dict)
+    model.first_stage_model.decoder.eval()
+    wandb.finish()
+    return recon_image
 
 
 @contextmanager
@@ -791,5 +977,3 @@ def timethis(name):
 if __name__ == '__main__':
     with timethis("main"):
         main()
-
-
