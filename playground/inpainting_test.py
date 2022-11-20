@@ -128,7 +128,9 @@ def sample_euler_inpainting(model, x, sigmas, extra_args=None, callback=None, di
         x_prev = x
         x = x + d * dt
         if mask is not None and x_0 is not None:
-            if mcg_alpha > 0:
+            # if x.shape[-1] == x.shape[-2]:
+            #     pass
+            if mcg_alpha != 0:
                 # mcg_guidance = make_mcg_guidance_fn(mcg_alpha)
                 with torch.enable_grad():
                     x_prev = x_prev.detach().requires_grad_()
@@ -137,7 +139,7 @@ def sample_euler_inpainting(model, x, sigmas, extra_args=None, callback=None, di
                     mcg_grad = torch.autograd.grad(mcg_loss, x_prev)[0]
 
                     # cond_grad = mcg_guidance(x_prev, sigma_hat, denoised=denoised, mask=mask, source=x_0).detach()
-                x = x - (mcg_alpha * mcg_grad * (1 - mask) / (c_in))  # .clip(-0.3, 0.3)
+                x = x - (mcg_alpha * mcg_grad * (1 - mask) / (c_in * c_in_1))  # .clip(-0.3, 0.3)
                 print(f"cond_grad: {mcg_grad.abs().mean().item()}")
                 print(f"cond_grad * mask / (c_in * c_in_1): {(mcg_alpha * mcg_grad * mask / (c_in)).std().item()}")
 
@@ -213,7 +215,7 @@ def warp_im_alphapose(img, mask, clothes_mask, head_mask, human_alpha, human_fac
     warped_face_kp = np.array([warped_face_kp[i, 0] for i in range(len(warped_face_kp))])
     warped_face_pca_head_bbox = cv2.perspectiveTransform(face_pca_head_bbox_forT, rot_mat3d)
 
-    return warped_im, warped_mask, warped_clothes_mask, warped_head_mask, warped_body_kp, warped_face_kp, warped_face_pca_head_bbox.flatten().astype(
+    return warp_matrix, warped_im, warped_mask, warped_clothes_mask, warped_head_mask, warped_body_kp, warped_face_kp, warped_face_pca_head_bbox.flatten().astype(
         int)
 
 
@@ -448,45 +450,71 @@ def main():
     ddim_steps = 100
 
     seed_everything(seed)
-    # face_crop_size = 256
-    # face_crop_scale = 2.0
-    # H, W, C, f = 960, 640, 4, 8
-    # H, W, C, f = 1280 + 64 + 64, 960, 4, 8
-    # H, W, C, f = 1408, 768, 4, 8
-    # H, W, C, f = 960, 640, 4, 8
-    # H, W, C, f = 1536, 832, 4, 8
-    H, W, C, f = 1600, 832, 4, 8
-    head_width = head_height = 512
-    face_width = face_height = 512
-    face_crop_size = 512
-    face_crop_scale = 1.5
+
+    low_vram = True
+    if low_vram:
+        H, W, C, f = 960, 640, 4, 8
+        head_width = head_height = 512
+        face_width = face_height = 512
+        bodyhead_mcg_alpha = 0  # 3e-3
+        bodyheadface_mcg_alpha = 0  # 3e-3
+        do_body_background_reconstruction = False
+        do_headface_background_reconstruction = False
+
+    else:
+        H, W, C, f = 1408, 768, 4, 8
+        head_width = head_height = 512
+        face_width = face_height = 512
+        bodyhead_mcg_alpha = 0  # 3e-3
+        bodyheadface_mcg_alpha = 0  # 3e-3
+        do_body_background_reconstruction = False
+        do_headface_background_reconstruction = True
+
     use_head = True
     use_face = True
     use_init_head = False
-    do_body_background_reconstruction = False
     do_superresolution = False
-    body_denoising_strength = 0.5
+    body_denoising_strength = 0.35
     head_denoising_strength = 0.65
     face_denoising_strength = 0.5  # 0.35
-    bodyhead_mcg_alpha = -1e-1
-    bodyheadface_mcg_alpha = -1e-1
-    scale = 15
+    bodyhead_mcg_alpha = 0  # 3e-3
+    bodyheadface_mcg_alpha = 0  # 3e-3
+    scale = 20
     upsampler = get_default_upsampler()
     # prompt = "An apartment complex in the city"
     # prompt = "a baby sitting on a bench"
     # prompt = "a green bench in a park"
     # prompt = "Emma Watson, studio lightning, realistic, fashion photoshoot, asos, perfect face, symmetric face"
-    prompt = "qwv man, german, european, caucasian"
     prompt = "qwv man"
-    negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, unrealistic, imaginative, african, blurry"
-
+    # prompt = "qwv man, studio fashion photoshoot, studio lighting"
+    # prompt = "qwv man, middle eastern, indian, brown skin"
+    # prompt = "Tom Cruise"
+    # prompt = "Joe Biden"
+    negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, unrealistic, imaginative, african, blurry, outdoors, outdoors lighting"
+    use_finetune = False
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
-    model_name = "avi_dual_face_3ddfa_qwv"
-    # model = load_model_from_config(config, f"../../dreambooth_sd/stable_diffusion_weights/{model_name}/model.ckpt")
-    model = load_model_from_config(config, f"../models/ldm/stable-diffusion-v1/dreambooth/{model_name}/model.ckpt")
-    target_scales = [350, 210]  # depends on the crop. full head 210, tight face 350
-    enlarge_bys = [0.2, 0.7]  # depende on the crop. full head 0.7, tight face 0.2
+    if use_finetune:
+        model_name = "finetune_asos"
+        model = load_model_from_config(config, f"/mnt/gs/botika-ai-datasets/stable-diffusion/finetune/last.ckpt")
+        # prompt = "asos style, " + prompt
+    else:
+        model_name = "avi_dual_face_3ddfa_qwv"
+        model = load_model_from_config(config, f"../models/ldm/stable-diffusion-v1/dreambooth/{model_name}/model.ckpt")
 
+        # model_path = "botika-ai-datasets/stable-diffusion/dreambooth/singlePrompts_dual_face_newtokens_gal"
+        # model_step = 1200
+        # model_name = os.path.split(model_path)[-1] + f"_step_{model_step}"
+        # model = load_model_from_config(config, f"/mnt/gs/{model_path}/{model_step}/model.ckpt")
+
+    # model = load_model_from_config(config, f"../models/ldm/stable-diffusion-v1/model_shuki1.ckpt")
+    target_mean_skin = np.array([200, 150, 120], dtype=np.float32)
+    # prompt = "shukistern guy, german, european, caucasian"
+    # prompt = "guy, german, european, caucasian"
+    target_scales = [350, 210]  # depends on the crop. full head 210, tight face 350
+    # target_scales = [300, 140]
+
+    enlarge_bys = [0.2, 0.7]  # depende on the crop. full head 0.7, tight face 0.2
+    enlarge_bys = [0.3, 1.2]
     image_list1 = []
     use_face1 = []
     src_dir1 = '../assets/sample_images/fashion_images/full body/'
@@ -507,7 +535,7 @@ def main():
     # use_face2 = [0]
 
     idxs1 = [0]
-    idxs2 = [5]
+    idxs2 = [3, 4, 5]
 
     # image_list1 = [image_list1[i] for i in idxs1]
     # use_face1 = [use_face1[i] for i in idxs1]
@@ -541,6 +569,7 @@ def main():
         source_image_path = os.path.join(cropped_dir, image_name + '.png')
         body_mask_path = os.path.join(cropped_dir, f"{image_name}_body.png")
         head_mask_path = os.path.join(cropped_dir, f"{image_name}_head.png")
+        skin_mask_path = os.path.join(cropped_dir, f"{image_name}_skin.png")
         clothes_mask_path = os.path.join(cropped_dir, f"{image_name}_clothes.png")
 
         source_image = cv2.imread(source_image_path)
@@ -548,6 +577,7 @@ def main():
         mask = cv2.imread(body_mask_path, cv2.IMREAD_GRAYSCALE)
         head_mask = cv2.imread(head_mask_path, cv2.IMREAD_GRAYSCALE)
         clothes_mask = cv2.imread(clothes_mask_path, cv2.IMREAD_GRAYSCALE)
+        skin_mask = cv2.imread(skin_mask_path, cv2.IMREAD_GRAYSCALE)
 
         image_full_name = [im_name for im_name in src_video_alpha_info.keys() if image_name + '.' in im_name][0]
         frame_alpha_data = src_video_alpha_info[image_full_name]
@@ -556,11 +586,13 @@ def main():
         human_face = frame_face_data[str(best_human_ind)]
         human_alpha = frame_alpha_data['humans'][best_human_ind]
 
-        source_image, mask, clothes_mask, warped_head_mask, warped_body_kp, warped_face_kp, warped_face_pca_head_bbox = \
+        warp_matrix, source_image, mask, clothes_mask, warped_head_mask, warped_body_kp, warped_face_kp, warped_face_pca_head_bbox = \
             warp_im_alphapose(source_image, mask, clothes_mask, head_mask, human_alpha, human_face, H, W)
 
         mask = dilate_mask(mask, kernel_size=mask_dilation // 2)
         mask = (1 - clothes_mask // 255) * mask  # restricted
+
+        skin_mask = cv2.warpAffine(skin_mask, warp_matrix, (W, H))
 
         body_kp = warped_body_kp
         face_kp = warped_face_kp
@@ -570,6 +602,16 @@ def main():
         enlarge_by_face = enlarge_bys[0]
         target_scale_head = target_scales[1]
         enlarge_by_head = enlarge_bys[1]
+
+        fix_skin_color = True
+        if fix_skin_color:
+            fixed_mean_skin = target_mean_skin
+            skin_mask = (skin_mask > 0).astype(np.uint8)[..., None]
+            mean_skin_color = (skin_mask * source_image).sum(axis=(0, 1)) / (skin_mask.sum(axis=(0, 1)) + 1e-8)
+            color_diff = (fixed_mean_skin - mean_skin_color)[None, None, :]
+            source_image = (1 - skin_mask) * source_image + skin_mask * (source_image + color_diff)
+            source_image = np.clip(source_image, 0, 255)
+            cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_fixed_skin.png"), source_image[..., ::-1])
 
         if use_head or use_init_head:
             head_image, warp_mat3d_to_head = get_crop_by_head(source_image, body_kp, face_kp,
@@ -646,7 +688,7 @@ def main():
                                                         ddim_steps=ddim_steps,
                                                         denoising_strength=head_denoising_strength,
                                                         cfg_scale=scale, device=device, alpha=bodyhead_mcg_alpha,
-                                                        do_background_reconstruction=True,
+                                                        do_background_reconstruction=do_headface_background_reconstruction,
                                                         image_name=image_name + '_head')
             recon_image_pasted_headtobody = invert_warp_to_paste(recon_image[0], recon_face_crop_bodyhead[0],
                                                                  np.ones_like(head_crop_mask),
@@ -674,7 +716,7 @@ def main():
                                                                 denoising_strength=face_denoising_strength,
                                                                 cfg_scale=scale, device=device,
                                                                 alpha=bodyheadface_mcg_alpha,
-                                                                do_background_reconstruction=True,
+                                                                do_background_reconstruction=do_headface_background_reconstruction,
                                                                 image_name=image_name + '_face')
                 # recon_image_pasted_facetoheadbody = invert_warp_to_paste(recon_image_pasted_headtobody,
                 #                                                          recon_face_crop_bodyheadface[0],
@@ -767,7 +809,7 @@ def main():
                                           f"{face_denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_facepaste.png"),
                 source_image_pasted_head)
             im_ind += 1
-        rec_img_body = cv2.cvtColor(recon_image, cv2.COLOR_RGB2BGR)
+        rec_img_body = cv2.cvtColor(recon_image[0], cv2.COLOR_RGB2BGR)
         cv2.imwrite(
             os.path.join(outputs_dir, f"{image_name}_{im_ind}_{body_denoising_strength}_{head_denoising_strength}_"
                                       f"{face_denoising_strength}_{scale}_{ddim_steps}_{H}_{W}_body_noise05.png"),
@@ -816,7 +858,7 @@ def main():
 
 def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps, denoising_strength=0.5, cfg_scale=10,
                   device='cuda', batch_size=1, alpha=0, batch_cond_uncond=False, do_background_reconstruction=False,
-                  image_name=None):
+                  image_name=None, s_noise=0):
     # masked_image = (source_image * (1 - mask[:, :, None] / 255) + mask[:, :, None]).astype(np.uint8)
     n_steps = int(denoising_strength * ddim_steps)
     # fig, axes = plt.subplots(1, 3)
@@ -827,7 +869,7 @@ def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps
     dnw = CFGCompVisDenoiser(model.to(device), batch_cond_uncond=batch_cond_uncond, device=device)
     sigmas = dnw.get_sigmas(ddim_steps).to(device)
     sigmas[-1] = 1e-5
-    sample_fn = lambda *args, **kwargs: sample_euler_inpainting(*args, **kwargs, s_noise=1.0, mcg_alpha=alpha)
+    sample_fn = lambda *args, **kwargs: sample_euler_inpainting(*args, **kwargs, s_noise=s_noise, mcg_alpha=alpha)
     model_fn = dnw
     # model.to('cpu')
     with torch.no_grad():
