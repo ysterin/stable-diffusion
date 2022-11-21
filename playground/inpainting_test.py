@@ -451,18 +451,18 @@ def main():
 
     seed_everything(seed)
 
-    low_vram = True
+    low_vram = False
     if low_vram:
         H, W, C, f = 960, 640, 4, 8
         head_width = head_height = 512
         face_width = face_height = 512
-        bodyhead_mcg_alpha = 0  # 3e-3
-        bodyheadface_mcg_alpha = 0  # 3e-3
+        bodyhead_mcg_alpha = 0
+        bodyheadface_mcg_alpha = 0
         do_body_background_reconstruction = False
         do_headface_background_reconstruction = False
 
     else:
-        H, W, C, f = 1408, 768, 4, 8
+        H, W, C, f = 1600, 832, 4, 8
         head_width = head_height = 512
         face_width = face_height = 512
         bodyhead_mcg_alpha = 0  # 3e-3
@@ -474,18 +474,19 @@ def main():
     use_face = True
     use_init_head = False
     do_superresolution = False
-    body_denoising_strength = 0.35
+    body_denoising_strength = 0.5
     head_denoising_strength = 0.65
     face_denoising_strength = 0.5  # 0.35
     bodyhead_mcg_alpha = 0  # 3e-3
     bodyheadface_mcg_alpha = 0  # 3e-3
-    scale = 20
+    scale = 15
     upsampler = get_default_upsampler()
     # prompt = "An apartment complex in the city"
     # prompt = "a baby sitting on a bench"
     # prompt = "a green bench in a park"
     # prompt = "Emma Watson, studio lightning, realistic, fashion photoshoot, asos, perfect face, symmetric face"
-    prompt = "qwv man"
+    prompt = "qwv man, german, european, caucasian, bright skin, perfect white teeth, asos fashion, studio lightning, realistic, " \
+             "professional fashion photoshoot, high resolution, detailed face, perfect face, symmetric face, 4k"
     # prompt = "qwv man, studio fashion photoshoot, studio lighting"
     # prompt = "qwv man, middle eastern, indian, brown skin"
     # prompt = "Tom Cruise"
@@ -495,11 +496,18 @@ def main():
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
     if use_finetune:
         model_name = "finetune_asos"
-        model = load_model_from_config(config, f"/mnt/gs/botika-ai-datasets/stable-diffusion/finetune/last.ckpt")
+        # model = load_model_from_config(config, f"/mnt/gs/botika-ai-datasets/stable-diffusion/finetune/last.ckpt")
+        prompt = "oth man"
+        model_path = "botika-ai-datasets/stable-diffusion/dreambooth/newfs_singlePrompts_dual_face_newtokens_avi"
+        model_step = 3000
+        model_name = os.path.split(model_path)[-1] + f"_step_{model_step}"
+        model = load_model_from_config(config, f"/mnt/gs/{model_path}/{model_step}/model.ckpt")
+
         # prompt = "asos style, " + prompt
     else:
         model_name = "avi_dual_face_3ddfa_qwv"
-        model = load_model_from_config(config, f"../models/ldm/stable-diffusion-v1/dreambooth/{model_name}/model.ckpt")
+        model_path = f"../models/ldm/stable-diffusion-v1/dreambooth/{model_name}/model.ckpt"
+        model = load_model_from_config(config, model_path)
 
         # model_path = "botika-ai-datasets/stable-diffusion/dreambooth/singlePrompts_dual_face_newtokens_gal"
         # model_step = 1200
@@ -507,6 +515,7 @@ def main():
         # model = load_model_from_config(config, f"/mnt/gs/{model_path}/{model_step}/model.ckpt")
 
     # model = load_model_from_config(config, f"../models/ldm/stable-diffusion-v1/model_shuki1.ckpt")
+    fix_skin_color = True
     target_mean_skin = np.array([200, 150, 120], dtype=np.float32)
     # prompt = "shukistern guy, german, european, caucasian"
     # prompt = "guy, german, european, caucasian"
@@ -515,6 +524,15 @@ def main():
 
     enlarge_bys = [0.2, 0.7]  # depende on the crop. full head 0.7, tight face 0.2
     enlarge_bys = [0.3, 1.2]
+
+    config_dict = {'prompt': prompt, 'negative_prompt': negative_prompt, 'use_finetune': use_finetune, 'model_name': model_name,
+                   'use_head': use_head, 'use_face': use_face, 'use_init_head': use_init_head,
+                   'do_superresolution': do_superresolution, 'body_denoising_strength': body_denoising_strength,
+                   'head_denoising_strength': head_denoising_strength, 'face_denoising_strength': face_denoising_strength,
+                   'bodyhead_mcg_alpha': bodyhead_mcg_alpha, 'bodyheadface_mcg_alpha': bodyheadface_mcg_alpha,
+                   'scale': scale, 'H': H, 'W': W, 'C': C, 'f': f, 'head_width': head_width, 'head_height': head_height,
+                   'face_width': face_width, 'face_height': face_height, 'model_path': model_path,
+                   "fix_skin_color": fix_skin_color, "target_mean_skin": target_mean_skin.tolist()}
     image_list1 = []
     use_face1 = []
     src_dir1 = '../assets/sample_images/fashion_images/full body/'
@@ -551,8 +569,25 @@ def main():
     src_video_alpha_info.update(src_video_alpha_info2)
     src_info_face_pca.update(src_info_face_pca2)
 
-    outputs_dir = f"outputs/inpainting/fashion_images/prompts/{prompt.replace(' ', '_').replace(',', '')}/{model_name}_bodyheadface_detailed_prompt"
+    # outputs_dir = f"outputs/inpainting/fashion_images/prompts/{prompt.replace(' ', '_').replace(',', '')}/{model_name}_bodyheadface_detailed_prompt"
+    outputs_dir = f"outputs/inpainting/fashion_images/models/{model_name}_bodyheadface_detailed_prompt"
+
     os.makedirs(outputs_dir, exist_ok=True)
+    subfolder_names = [f for f in os.listdir(outputs_dir) if os.path.isdir(os.path.join(outputs_dir, f))]
+    subfolder_names = [int(f) for f in subfolder_names]
+    if len(subfolder_names) > 0:
+        subfolder_names.sort()
+        subfolder_name = subfolder_names[-1] + 1
+    else:
+        subfolder_name = 0
+    with open(os.path.join(outputs_dir, f"config_{subfolder_name}.json"), "w") as f:
+        json.dump(config_dict, f, indent=4)
+
+    outputs_dir = os.path.join(outputs_dir, str(subfolder_name))
+    os.makedirs(outputs_dir, exist_ok=True)
+
+    with open(os.path.join(outputs_dir, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=4)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
@@ -603,7 +638,6 @@ def main():
         target_scale_head = target_scales[1]
         enlarge_by_head = enlarge_bys[1]
 
-        fix_skin_color = True
         if fix_skin_color:
             fixed_mean_skin = target_mean_skin
             skin_mask = (skin_mask > 0).astype(np.uint8)[..., None]
