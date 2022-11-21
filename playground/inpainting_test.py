@@ -485,19 +485,19 @@ def main():
     # prompt = "a baby sitting on a bench"
     # prompt = "a green bench in a park"
     # prompt = "Emma Watson, studio lightning, realistic, fashion photoshoot, asos, perfect face, symmetric face"
-    prompt = "qwv man, german, european, caucasian, bright skin, perfect white teeth, asos fashion, studio lightning, realistic, " \
-             "professional fashion photoshoot, high resolution, detailed face, perfect face, symmetric face, 4k"
     # prompt = "qwv man, studio fashion photoshoot, studio lighting"
     # prompt = "qwv man, middle eastern, indian, brown skin"
     # prompt = "Tom Cruise"
     # prompt = "Joe Biden"
-    negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, unrealistic, imaginative, african, blurry, outdoors, outdoors lighting"
-    use_finetune = False
+    use_remote = True
     config = OmegaConf.load("../configs/stable-diffusion/v1-inference.yaml")
-    if use_finetune:
-        model_name = "finetune_asos"
+    if use_remote:
+        # model_name = "finetune_asos"
         # model = load_model_from_config(config, f"/mnt/gs/botika-ai-datasets/stable-diffusion/finetune/last.ckpt")
-        prompt = "oth man"
+        # prompt = "oth man"
+        # id_token = "kcr"
+        # model_path = "botika-ai-datasets/stable-diffusion/dreambooth/singlePrompts_dual_face_newtokens_man_13"
+        id_token = "oth"
         model_path = "botika-ai-datasets/stable-diffusion/dreambooth/newfs_singlePrompts_dual_face_newtokens_avi"
         model_step = 3000
         model_name = os.path.split(model_path)[-1] + f"_step_{model_step}"
@@ -508,11 +508,23 @@ def main():
         model_name = "avi_dual_face_3ddfa_qwv"
         model_path = f"../models/ldm/stable-diffusion-v1/dreambooth/{model_name}/model.ckpt"
         model = load_model_from_config(config, model_path)
+        id_token = "qwv"
 
         # model_path = "botika-ai-datasets/stable-diffusion/dreambooth/singlePrompts_dual_face_newtokens_gal"
         # model_step = 1200
         # model_name = os.path.split(model_path)[-1] + f"_step_{model_step}"
         # model = load_model_from_config(config, f"/mnt/gs/{model_path}/{model_step}/model.ckpt")
+
+    prompt = f"{id_token} man, german, european, caucasian, bright skin, perfect white teeth, asos fashion, " \
+             f"studio lightning, realistic, " \
+             f"professional fashion photoshoot, high resolution, 4k"
+    negative_prompt = "makeup, artistic, photoshop, painting, artstation, art, ugly, bad teeth, unrealistic, " \
+                      "imaginative, african, " \
+                      "blurry, outdoors, outdoors lighting, sunny, shade, shadows"
+    back_prompt = "back photo, nape, facing backwards, " + prompt
+    head_prompt = "detailed head close up fashion portrait, " + prompt + ", detailed face, perfect face, symmetric face"
+    face_prompt = "detailed face close up fashion portrait, " + prompt + ", detailed face, perfect face, symmetric face"
+    back_head_prompt = "back of head, nape, back photo, " + prompt
 
     # model = load_model_from_config(config, f"../models/ldm/stable-diffusion-v1/model_shuki1.ckpt")
     fix_skin_color = True
@@ -525,7 +537,8 @@ def main():
     enlarge_bys = [0.2, 0.7]  # depende on the crop. full head 0.7, tight face 0.2
     enlarge_bys = [0.3, 1.2]
 
-    config_dict = {'prompt': prompt, 'negative_prompt': negative_prompt, 'use_finetune': use_finetune, 'model_name': model_name,
+    config_dict = {'prompt': prompt, 'negative_prompt': negative_prompt, 'head_prompt': head_prompt, 'back_prompt': back_prompt,
+                    'face_prompt': face_prompt, 'back_head_prompt': back_head_prompt, 'model_name': model_name,
                    'use_head': use_head, 'use_face': use_face, 'use_init_head': use_init_head,
                    'do_superresolution': do_superresolution, 'body_denoising_strength': body_denoising_strength,
                    'head_denoising_strength': head_denoising_strength, 'face_denoising_strength': face_denoising_strength,
@@ -695,7 +708,9 @@ def main():
                 #                                             warp_mat3d_to_face, H, W)
 
         if use_init_head:
-            _, recon_crop_head = inpaint_image(head_image, head_crop_mask, model, prompt, negative_prompt,
+            _, recon_crop_head = inpaint_image(head_image, head_crop_mask, model,
+                                               prompt=prompt,
+                                               negative_prompt=negative_prompt,
                                                ddim_steps=ddim_steps, denoising_strength=head_denoising_strength,
                                                cfg_scale=scale, device=device)
             source_image_pasted_head = invert_warp_to_paste(source_image.copy(), recon_crop_head[0],
@@ -705,7 +720,9 @@ def main():
                                            ddim_steps=ddim_steps, denoising_strength=body_denoising_strength,
                                            cfg_scale=scale, device=device)
         else:
-            _, recon_image = inpaint_image(source_image.copy(), mask.copy(), model, prompt, negative_prompt,
+            _, recon_image = inpaint_image(source_image.copy(), mask.copy(), model,
+                                           prompt=prompt if use_face_cur else back_prompt,
+                                           negative_prompt=negative_prompt,
                                            ddim_steps=ddim_steps, denoising_strength=body_denoising_strength,
                                            cfg_scale=scale, device=device,
                                            do_background_reconstruction=do_body_background_reconstruction,
@@ -718,7 +735,9 @@ def main():
                 head_crop = get_warp_im(recon_image[0].copy(), warp_mat3d_to_head, dst_height=head_height,
                                         dst_width=head_width)
 
-            _, recon_face_crop_bodyhead = inpaint_image(head_crop, head_crop_mask, model, prompt, negative_prompt,
+            _, recon_face_crop_bodyhead = inpaint_image(head_crop, head_crop_mask, model,
+                                                        prompt=head_prompt if use_face_cur else back_head_prompt,
+                                                        negative_prompt=negative_prompt,
                                                         ddim_steps=ddim_steps,
                                                         denoising_strength=head_denoising_strength,
                                                         cfg_scale=scale, device=device, alpha=bodyhead_mcg_alpha,
@@ -744,7 +763,7 @@ def main():
                 else:
                     face_crop_from_head = get_warp_im(recon_face_crop_bodyhead[0], warp_mat3d_head_to_face,
                                                       dst_height=face_height, dst_width=face_width)
-                _, recon_face_crop_bodyheadface = inpaint_image(face_crop_from_head, face_crop_mask, model, prompt,
+                _, recon_face_crop_bodyheadface = inpaint_image(face_crop_from_head, face_crop_mask, model, face_prompt,
                                                                 negative_prompt,
                                                                 ddim_steps=ddim_steps,
                                                                 denoising_strength=face_denoising_strength,
@@ -884,10 +903,6 @@ def main():
                                                         f"_{scale}_{ddim_steps}_{H}_{W}_face.png"),
                             rec_img_facetoheadbody)
                 im_ind += 1
-        # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{body_denoising_strength}_{denoising_strength}_{scale}_
-        #   {ddim_steps}_{H}_{W}_pasted_head.png"), rec_img_pasted_1)
-        # cv2.imwrite(os.path.join(outputs_dir, f"{image_name}_{body_denoising_strength}_{denoising_strength}_{scale}_
-        #   {ddim_steps}_{H}_{W}_pasted_face.png"), rec_img_pasted_2)
 
 
 def inpaint_image(source_image, mask, model, prompt, negative_prompt, ddim_steps, denoising_strength=0.5, cfg_scale=10,
